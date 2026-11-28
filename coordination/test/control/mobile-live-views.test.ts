@@ -35,7 +35,10 @@ function fixture(t: TestContext, devices = 1) {
     principal: () => token === options.adminToken ? { kind: "operator", user: null, scopes: ["admin"] } : principalHash(undefined, tokenHash(token)) });
   const ids = Array.from({ length: devices }, () => String(machines.create({ id: randomUUID(), name: "phone", templateId: phone.id, resources: {} }, req("POST", "/v1/machines")).id));
   const states = new Map(ids.map(id => [id, "running"]));
-  const heartbeat = () => object(machines.heartbeat(host, hostToken, { offer, reports: Object.fromEntries([...states].map(([id, state]) => [id, { state }])) }));
+  const heartbeat = (captureJournalsReady?: boolean) => object(machines.heartbeat(host, hostToken, {
+    offer, reports: Object.fromEntries([...states].map(([id, state]) => [id, { state }])),
+    ...(captureJournalsReady === undefined ? {} : { health: { status: "passed", checkedAt: now, capabilities: { captureJournalsReady } } }),
+  }));
   heartbeat();
   const call = (method: string, path: string, body: Record<string, unknown> = {}, token = ownerToken) => { const response = views.handle(req(method, path, body, token)); assert.ok(response); return object(response.body) as unknown as View; };
   const base = (machine = ids[0]!) => `/v1/machines/${machine}/live-views`;
@@ -183,6 +186,9 @@ test("an unversioned runner gets exclusive admissions in pending, attached and r
   const recording = record();
   const attach = { type: "video-sessions.attach", sessionId: String(recording.id), generation: String(recording.generation) } as const;
   assert.throws(() => f.create(), refused(409, "device_recording_active"));
+  f.heartbeat(false);
+  assert.throws(() => f.create(), { code: "capture_journal_uncertain", retryable: false });
+  f.heartbeat(true);
   f.video.command({ ...attach, side: "host", ownerId: f.host, token: f.hostToken });
   assert.throws(() => f.create(), refused(409, "device_recording_active"));
   f.video.command({ ...attach, side: "consumer", ownerId: machine, token: f.ownerToken });

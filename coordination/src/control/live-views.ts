@@ -241,8 +241,8 @@ export class MobileLiveViews implements ControlModule {
   /** Joins the device's live capture or admits one in this write transaction. */
   private admit(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, ttl: number, lease: { id: string; consumer: string; credential: string; member: string } | null): Row {
     requireHostAdmission(db, String(m.host));
-    this.video.requireExclusive(db, String(m.id), 'record');
     this.video.requireCaptureHost(db, String(m.host));
+    this.video.requireExclusive(db, String(m.id), 'record');
     this.limits(db, m, credential);
     const running = db.prepare("SELECT * FROM mobile_video_sessions WHERE machine=? AND kind='live' AND state IN ('pending','attaching','ready')").get(String(m.id)) as unknown as VideoSessionRow | undefined;
     const capture = running ?? this.video.admitLiveCapture(db, m, CAPTURE_REQUEST, LIVE_VIEW_SECONDS, lease);

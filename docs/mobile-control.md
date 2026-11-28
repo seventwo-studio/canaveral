@@ -1536,12 +1536,23 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `<stateDir>/work/video` before replay. It accepts a legacy flat journal when
   its body identifies exactly one device and no other journal claims that
   capture. Legacy ownership sidecars are ignored. Unreadable journals, invalid
-  or incomplete records, duplicate fields, conflicting copies, and filenames with a noncanonical
-  extension such as `.JSON` disable recordings and live views across the host.
-  The runner refuses them with `capture_journal_uncertain` and suppresses cleanup
-  receipts. The host health report identifies the problem and the runner logs
-  list the affected paths and reasons. Independent device stop proofs still
-  apply.
+  or incomplete records, duplicate fields, conflicting copies, and noncanonical
+  extensions such as `.JSON` disable capture on the runner. A journal that
+  disappears or changes outside a runner write also disables capture. With
+  matching controller and runner versions that support this refusal, new
+  recordings and live views across the host receive the non-retryable
+  `capture_journal_uncertain` error once the controller sees the runner's
+  health report. The runner also refuses pending attachments and suppresses
+  cleanup receipts. Its logs list the affected paths and reasons. Independent
+  device stop proofs still apply.
+- **Replay.** Only a `finished` journal with `cleaned: true` can release a
+  reservation by itself. It records the runner's proof that capture never
+  started or that it stopped. A saved `hostCleaned: true` receipt can repeat
+  proof of encoder exit, and still needs separate proof that the recorder
+  stopped. An `attaching` journal found on restart could be an older copy from
+  before native dispatch. It triggers host-wide refusal and keeps the
+  reservation held. A `started` or `unknown` journal without cleanup proof
+  keeps its reservation.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
   a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further
@@ -1553,7 +1564,10 @@ by the recording path's rules. A wedged encoder never frees capacity.
 - **Operator recovery.** Take the runner out of service and verify that the
   affected recorders and encoders have stopped on the devices and host. Once
   verified, clear the uncertain capture journals in `<stateDir>/work/live` and
-  `<stateDir>/work/video`. Restart the runner. Capture admission resumes only
+  `<stateDir>/work/video` and remove
+  `<stateDir>/capture-journal-uncertain.json`. The marker persists the refusal
+  across restarts. A runner that finds the marker or cannot read it refuses
+  capture. Restart the runner. Capture admission resumes only
   after the restarted runner scans both directories without finding uncertainty.
   Clearing files and restarting do not release held controller reservations,
   including requests that had already attached when the refusal took effect.

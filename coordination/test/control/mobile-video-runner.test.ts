@@ -186,17 +186,56 @@ test('a broker close during recording stops the started source and proves cleanu
   } finally { consumer.close(); }
 });
 
-test('restart replays positive cleanup for a recording journaled before native dispatch', { timeout: 15000 }, async t => {
-  const f = await fixture(t), recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
-  const identity = f.runner.identity!;
-  const host = await SessionConnection.connect(f.url, `/v1/hosts/${identity.id}/video-sessions/${recording.id}/${recording.generation}`, identity.credential);
-  await f.videoApi.close(f.machineId, recording.id);
-  host.close();
-  saveRecord(join(f.config.stateDir, 'work', 'video', `${f.machineId}.${recording.id}.json`), {
-    state: 'attaching', generation: recording.generation, machineId: f.machineId,
+for (const scenario of ['finished', 'attaching', 'regressed', 'disappeared'] as const) {
+  test(`recording journal replay with state or fault: ${scenario}`, { timeout: 15000 }, async t => {
+    const f = await fixture(t), baseline = await f.reservedCpu();
+    const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+    const identity = f.runner.identity!;
+    const host = await SessionConnection.connect(f.url, `/v1/hosts/${identity.id}/video-sessions/${recording.id}/${recording.generation}`, identity.credential);
+    await f.videoApi.close(f.machineId, recording.id);
+    host.close();
+    const path = join(f.config.stateDir, 'work', 'video', `${f.machineId}.${recording.id}.json`);
+    const marker = join(f.config.stateDir, 'capture-journal-uncertain.json');
+    const intent = { generation: recording.generation, machineId: f.machineId };
+    const cleaned = async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned;
+    const refused = { code: 'capture_journal_uncertain', retryable: false };
+    const create = () => f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+    if (scenario === 'finished' || scenario === 'attaching') {
+      saveRecord(path, { ...intent, state: scenario, ...(scenario === 'finished' ? { cleaned: true } : {}) });
+      await f.restart();
+    } else {
+      saveRecord(path, { ...intent, state: 'unknown', cleaned: false });
+      await f.runner.poll();
+      await f.runner.step();
+      assert.equal(await cleaned(), false);
+      assert.equal(existsSync(marker), false);
+      if (scenario === 'regressed') saveRecord(path, { ...intent, state: 'attaching' });
+      else rmSync(path);
+      await f.runner.poll();
+      await f.runner.step();
+      await assert.rejects(create(), refused);
+      assert.equal(readRecord(marker).path, path);
+      if (scenario === 'disappeared') await f.restart();
+    }
+    if (scenario === 'finished') {
+      await f.eventually(async () => await cleaned() === true);
+      assert.equal(await f.reservedCpu(), baseline);
+    } else {
+      assert.ok(existsSync(marker));
+      await assert.rejects(create(), refused);
+      assert.equal(await cleaned(), false);
+      assert.equal(await f.reservedCpu(), baseline + 1);
+    }
+    assert.equal(f.captures, 0);
   });
+}
+
+test('an unreadable refusal marker blocks admission after startup', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  writeFileSync(join(f.config.stateDir, 'capture-journal-uncertain.json'), '{');
   await f.restart();
-  await f.eventually(async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned === true);
+  await assert.rejects(f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() }),
+    { code: 'capture_journal_uncertain', retryable: false });
   assert.equal(f.captures, 0);
 });
 
@@ -245,35 +284,44 @@ test('the runner refuses a recording when an old controller queues an overlappin
 const liveOwner = randomUUID();
 const ownedAssignments = (response: RecordValue) => (response.machines as RecordValue[]).map(machine => ({ ...machine, ownerId: liveOwner }));
 
-test('the runner refuses a late live view after a heartbeat replaces the cached absence of a recording', { timeout: 15000 }, async t => {
+test('the runner refuses a live view after a heartbeat delivers a recording while the view waits', { timeout: 15000 }, async t => {
   const f = await fixture(t), runner = f.runner;
   const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
   // Model an older controller delivering both families. Its view broker is represented by
   // the fixture channel, which consumes the runner's reply without opening a native source.
   const view = { id: randomUUID(), generation: randomUUID(), captureId: randomUUID(), captureGeneration: randomUUID(), machineId: f.machineId, state: 'pending' };
   const connect = SessionConnection.connect.bind(SessionConnection);
-  const control = Promise.withResolvers<RecordValue>();
+  const control = Promise.withResolvers<RecordValue>(), waiting = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>();
+  t.after(() => ready.resolve());
   t.mock.method(SessionConnection, 'connect', async (...args: Parameters<typeof connect>) => {
     if (!args[1].includes('/live-views/')) return connect(...args);
-    let ready = false;
+    let received = false;
     return {
       open: true,
-      receive: async () => { if (ready) return null; ready = true; return { type: 'ready', sessionId: view.id, generation: view.generation, capability: 'live' }; },
+      receive: async () => {
+        if (received) return null;
+        received = true;
+        waiting.resolve();
+        await ready.promise;
+        return { type: 'ready', sessionId: view.id, generation: view.generation, capability: 'live' };
+      },
       sendControl: async (message: RecordValue) => { control.resolve(message); },
       close: () => {},
     } as unknown as SessionConnection;
   });
-  // Warm the cache just before replacing the queue. Mock the transport to avoid a clock
-  // assumption about whether an HTTP heartbeat completes within its 250 ms lifetime.
-  const cached = runner as unknown as { liveRecordings: Map<string, { at: number; value: boolean }> };
+  let deliverRecording = false;
   const send = runner.transport.request.bind(runner.transport);
   t.mock.method(runner.transport, 'request', async (...args: Parameters<typeof send>) => {
     const response = await send(...args);
     if (!args[1].endsWith('/heartbeat')) return response;
-    cached.liveRecordings.set(f.machineId, { at: performance.now(), value: false });
-    return { ...response, machines: ownedAssignments(response), liveViews: [view] };
+    return { ...response, machines: ownedAssignments(response), liveViews: [view],
+      videoSessions: deliverRecording ? response.videoSessions : [] };
   });
   await runner.poll(); await runner.step();
+  await waiting.promise;
+  deliverRecording = true;
+  await runner.poll();
+  ready.resolve();
   assert.deepEqual(await control.promise, {
     type: 'error', code: 'device_recording_active',
     message: 'A recording still holds this device. Retry the live view after the recording ends and cleanup is confirmed.', outcome: 'unknown',

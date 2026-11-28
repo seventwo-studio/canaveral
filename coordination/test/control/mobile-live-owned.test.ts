@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { startController } from "../../src/main.ts";
 import { startDashboard } from "../../src/dashboard.ts";
 import { HostRunner } from "../../src/host.ts";
+import { SessionConnection } from "../../src/control/sessions.ts";
 import { saveRecord } from "../../src/runtime-process.ts";
 import type { HostConfig } from "../../src/host.ts";
 import { MobileProvider, markCaptureNotRunning } from "../../src/providers/mobile.ts";
@@ -567,13 +568,14 @@ test("an unreadable capture retains its reservation but allows stop proof and de
   await until(async () => (await session()).body.state === "disconnected", "the ended capture");
   const path = captureJournal(f.root, machineId, captureId);
   writeFileSync(path, "unreadable");
+  await f.runner.poll();
   // Advance the ended session's abandonment deadline without a wall-clock wait.
   using db = new DatabaseSync(join(f.root, "controller.sqlite"));
   db.exec("PRAGMA busy_timeout=5000");
   db.prepare("UPDATE mobile_video_sessions SET deadline=0 WHERE id=?").run(captureId);
   assert.equal((await f.api("POST", `${route}/video-sessions/${captureId}/abandon`, { reason: "Journal unreadable" })).status, 200);
   const refused = await f.api("POST", `${route}/live-views`, { id: randomUUID() }, owner.session);
-  assert.deepEqual([refused.status, refused.body.code], [409, "capture_cleanup_unproven"]);
+  assert.deepEqual([refused.status, refused.body.code], [409, "capture_journal_uncertain"]);
 
   assert.equal((await f.api("POST", `${route}/desired`, { state: "stopped" }, owner.session)).status, 200);
   assert.equal(await stop.promise, "stopped");
@@ -602,6 +604,42 @@ test("a runner refuses an older controller's unowned live assignment through the
   await assert.rejects(live.connect(view, { timeoutMs: 5000 }), { code: "session_incomplete" });
   await until(async () => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${view.captureId}`, undefined, owner.session)).body.cleaned === true, "receipt for the refused capture");
   assert.equal(f.stats.captures, 0);
+});
+
+test("journal refusal takes precedence while a second viewer waits for broker readiness", { timeout: 30000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  const video = new MobileVideoClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  const first = await f.watch(owner.session, machineId);
+  t.after(() => first.stream.close());
+  await until(() => media(first.got).length > 0, "the first viewer's media");
+
+  const id = randomUUID(), waiting = Promise.withResolvers<void>();
+  const connect = SessionConnection.connect.bind(SessionConnection);
+  t.mock.method(SessionConnection, "connect", async (...args: Parameters<typeof connect>) => {
+    const channel = await connect(...args);
+    if (args[1].includes(`/live-views/${id}/`)) {
+      const receive = channel.receive.bind(channel);
+      t.mock.method(channel, "receive", (seconds?: number) => {
+        waiting.resolve();
+        return receive(seconds);
+      });
+    }
+    return channel;
+  });
+  const second = await live.create(machineId, { id });
+  assert.equal(second.captureId, first.stream.view.captureId);
+  await waiting.promise;
+  writeFileSync(captureJournal(f.root, machineId, randomUUID()), "{");
+  await f.runner.poll();
+
+  const error = { code: "capture_journal_uncertain", retryable: false };
+  await assert.rejects(live.connect(second, { timeoutMs: 5000 }), error);
+  await assert.rejects(video.create(machineId, { id: randomUUID(), fps: 30, durationSeconds: 1, bitRate: 1_000_000 }), error);
+  assert.equal(f.stats.captures, 1);
+  first.stream.close(); await first.got.done;
+  await until(async () => (await video.inspect(machineId, second.captureId)).state === "disconnected", "ended capture");
+  assert.equal((await video.inspect(machineId, second.captureId)).cleaned, false);
 });
 
 for (const damage of ["flat and scoped copies", "several scoped copies", "uppercase extension", "unparseable body", "duplicate fields",
@@ -696,6 +734,9 @@ for (const damage of ["flat and scoped copies", "several scoped copies", "upperc
       rmSync(flat); rmSync(scoped);
       await assertRefusal();
       await f.restartRunner();
+      await f.runner.poll();
+      await assertRefusal();
+      await f.restartRunner(() => rmSync(join(f.root, "runner", "capture-journal-uncertain.json")));
       await f.runner.poll();
       const resumed = await f.watch(owner.session, otherDevice);
       await until(() => media(resumed.got).length > 0, "capture after a clean journal scan");

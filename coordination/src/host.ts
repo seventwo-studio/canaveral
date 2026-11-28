@@ -182,9 +182,8 @@ function loopbackController(base: URL): boolean {
 }
 
 function savedCaptureReceipt(saved: RecordValue): RecordValue | undefined {
-  // An attaching journal precedes all native dispatch. A host-only receipt
-  // confirms encoder exit and needs independent proof of the guest's stop.
-  const cleanup = saved.cleaned === true || saved.state === 'attaching' ? { cleaned: true }
+  // A host-only receipt confirms encoder exit and needs independent proof of the guest's stop.
+  const cleanup = saved.state === 'finished' && saved.cleaned === true ? { cleaned: true }
     : saved.hostCleaned === true ? { hostCleaned: true } : undefined;
   if (!cleanup) return;
   return { ...cleanup, ...(saved.ackReceived === true ? { ackReceived: true } : {}), ...(saved.stop ? { stop: saved.stop } : {}) };
@@ -414,7 +413,6 @@ export class HostRunner {
   /** Live views are attached once per identity; a refused or ended attachment is not retried. */
   private readonly liveAttempts = new Set<string>();
   private readonly liveAuthority = new Map<string, { at: number; value: boolean }>();
-  private readonly liveRecordings = new Map<string, { at: number; value: boolean }>();
   private readonly captureJournals: CaptureJournals;
   private readonly captureRefusalAttempts = new Set<string>();
   private readonly videoReceipts = new Map<string, Promise<void>>();
@@ -840,6 +838,7 @@ export class HostRunner {
   }
   async poll(): Promise<void> {
     if (!this.identity) throw new ServiceError("Host is not connected.", 409);
+    this.captureJournals.scan();
     const sentReports = new Map(this.reports), deviceReports = firstReport(this.deviceReports, true), inferenceReports = Object.keys(deviceReports).length ? {} : firstReport(this.inferenceReports), imageReports = firstReport(this.imageReports), baselineReports = firstReport(this.baselineReports, true);
     const sent = this.heartbeatClock();
     const offer = this.advertisedOffer(sent !== undefined);
@@ -882,7 +881,6 @@ export class HostRunner {
     for (const [id, record] of this.guard.records) if (record.retired) this.updateAssignments.delete(id);
     saveRecord(join(this.state, "update-assignments.json"), { machines: [...this.updateAssignments.values()] });
     this.assignments = machines; this.queues = queues; this.lastContact = timed ? sent : 0;
-    this.liveRecordings.clear();
     // Delivered: work that ended before this heartbeat has now been counted as activity.
     for (const id of reportedBusy) this.recentlyBusy.delete(id);
     if (maintenance !== undefined) this.maintenanceFence = maintenance;
@@ -1345,9 +1343,8 @@ export class HostRunner {
     if (this.closed) return;
     const identity = this.identity;
     if (this.queues.live?.length || this.queues.liveCaptures?.length) this.captureJournals.scan();
-    // Repeat a saved cleanup receipt the controller has not acknowledged. Only receipts repeat;
-    // a capture this process no longer holds is never resumed. A journal that never left
-    // `attaching` belongs to a capture that dispatched nothing native, which is positive cleanup.
+    // Repeat a saved cleanup receipt the controller has not acknowledged.
+    // A capture this process no longer holds is never resumed.
     for (const job of this.queues.liveCaptures ?? []) {
       const id = identifier(job.id), key = `live-capture:${id}`, generation = identifier(job.generation), machineId = identifier(job.machineId);
       if (!identity || this.active.has(key) || !this.fresh() || this.liveCaptures?.active(id)) continue;
@@ -1415,11 +1412,12 @@ export class HostRunner {
         id !== except && saved.state !== 'attaching' && !this.captureClean(kind, saved));
     } catch { return true; }
   }
-  private recordingPending(machineId: string): boolean {
-    const now = performance.now(), cached = this.liveRecordings.get(machineId);
-    if (cached && now - cached.at < 250) return cached.value;
-    const value = this.capturePending('video', machineId);
-    this.liveRecordings.set(machineId, { at: now, value }); return value;
+  private liveAdmissionRefusal(machineId: string, captureId: string): ServiceError | undefined {
+    const recordingPending = this.capturePending('video', machineId);
+    const livePending = this.unprovenCapture('live', machineId, captureId);
+    if (this.captureJournals.blocked) return captureJournalRefusal();
+    if (recordingPending) return captureConflict('record');
+    if (livePending) return captureConflict('live');
   }
   private liveSource(machine: RecordValue): LiveCaptureSource | undefined {
     const { runtime, image, folder } = this.context(machine), encoder = runtime.config?.videoEncoder;
@@ -1450,14 +1448,19 @@ export class HostRunner {
     const authorized = () => !context.signal.aborted && context.authorized();
     const ownerAuthorized = () => machine.lease != null || typeof machine.ownerId === 'string' &&
       this.assignments.some(current => current.id === machine.id && current.lease == null && current.ownerId === machine.ownerId);
+    const capture = { id: identifier(job.captureId), generation: identifier(job.captureGeneration), machineId: String(machine.id) };
+    const recheckAdmission = () => {
+      const conflict = handle ? this.liveAdmissionRefusal(capture.machineId, capture.id) : undefined;
+      if (!handle) this.captureJournals.scan();
+      if (this.captureJournals.blocked) refusal = captureJournalRefusal();
+      else refusal ??= conflict;
+    };
     try {
       // Journals the capture before this runner attaches for it; native dispatch is journaled again.
       // The controller treats a capture as needing a cleanup receipt from the moment its host
       // attaches, so this runner never attaches for a capture it holds no journal for: its view
       // then times out and the controller releases the unattached capture by itself. A capture
-      // that is ending, or was attempted before a restart, has a journal and will be reported;
-      // it is never joined or repeated, and the viewer is told so.
-      const capture = { id: identifier(job.captureId), generation: identifier(job.captureGeneration), machineId: String(machine.id) };
+      // that is ending or was attempted before a restart is never joined or repeated.
       let source: LiveCaptureSource | undefined;
       try {
         if (!authorized()) return;
@@ -1467,11 +1470,8 @@ export class HostRunner {
         source = this.liveSource(machine);
         // The hub checks its live reservation synchronously even if this queue snapshot
         // was cached before a recording reached native dispatch.
-        const recordingPending = this.recordingPending(capture.machineId);
-        const livePending = this.unprovenCapture('live', capture.machineId, capture.id);
-        this.captureJournals.requireReady();
-        if (recordingPending) throw captureConflict('record');
-        if (livePending) throw captureConflict('live');
+        const conflict = this.liveAdmissionRefusal(capture.machineId, capture.id);
+        if (conflict) throw conflict;
         handle = this.liveHub.acquire(capture, source);
       } catch (error) {
         if (this.captureJournals.blocked) { await this.refuseQueuedCapture('live', job, context); return; }
@@ -1488,13 +1488,18 @@ export class HostRunner {
       }
       channel = await SessionConnection.connect(this.config.url, `/v1/hosts/${identity.id}/live-views/${id}/${generation}`, identity.credential,
         { authorized, ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
+      recheckAdmission();
       const ready = await channel.receive(30), stream = channel;
+      recheckAdmission();
       if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== id || ready.generation !== generation || ready.capability !== 'live') return;
       if (refusal) { await this.sendCaptureRefusal(stream, refusal); return; }
       if (!ownerAuthorized()) { await this.sendCaptureRefusal(stream, new ServiceError('Live view rejected.', 404)); return; }
       if (!source) { await stream.sendControl({ type: 'error', code: 'capability_unsupported', message: 'This host has no live screen capture for this device.', outcome: 'unknown' }); return; }
       if (!handle) { await stream.sendControl({ type: 'end', reason: 'capture_ended' }); return; }
       await stream.sendControl({ type: 'live', mediaType: 'video/mp4', codec: 'avc1', fps: LIVE_FPS });
+      recheckAdmission();
+      if (refusal) { await this.sendCaptureRefusal(stream, refusal); return; }
+      if (!authorized() || !ownerAuthorized() || !stream.open) return;
       // A view feeds the capture only while its own socket and authority hold.
       const subscription = handle.subscribe(() => authorized() && ownerAuthorized() && stream.open);
       try {
@@ -1508,6 +1513,7 @@ export class HostRunner {
         }
       } finally { subscription.close(); }
     } catch {
+      if (!channel && this.captureJournals.blocked) await this.refuseQueuedCapture('live', job, context);
       // A viewer holds no durable intent: a refused attach, a departed viewer or lost authority
       // ends it. The capture's own journal and receipt are the hub's.
     } finally { channel?.close(); handle?.release(); }
@@ -1732,6 +1738,8 @@ export class HostRunner {
         { authorized: () => !context.signal.aborted && context.authorized(), ...(this.config.caFile ? { ca: readFileSync(this.config.caFile) } : {}) });
       const ready = await channel.receive(30);
       if (!ready || ready instanceof Uint8Array || ready.type !== 'ready' || ready.sessionId !== job.id || ready.generation !== job.generation || ready.capability !== 'video') throw unknownOutcome('Video peers did not attach.');
+      this.captureJournals.scan();
+      this.captureJournals.requireReady();
       const encoder = runtime.config?.videoEncoder;
       if (!runtime.openVideo || !runtime.pipe || typeof encoder !== 'string' || !isAbsolute(encoder) || !['android','ios'].includes(String(image.os))) {
         cleaned = true; throw new ServiceError('Native video requires an operator-configured encoder and capture adapter.', 409, { code: 'capability_unsupported' });
@@ -1748,8 +1756,7 @@ export class HostRunner {
       if (livePending || this.queues.live?.some(view => view.machineId === machineId)) throw captureConflict('live');
       if (recordingPending) throw captureConflict('record');
       release = this.liveHub.reserveRecording(machineId);
-      // A restart can report an attaching journal clean. Only a started journal may
-      // have opened native capture and must retain the reservation without proof.
+      // Record native dispatch intent before opening the source.
       this.captureJournals.save('video', recordingId, { generation: job.generation, machineId, state: 'started' });
       captureStarted = true;
       const source = await runtime.openVideo(machine, image, folder, options, live, () => this.machineAuthorized(machineId) && sameAssignment());
@@ -1770,7 +1777,7 @@ export class HostRunner {
       try {
         if (!this.captureJournals.blocked) this.captureJournals.save('video', recordingId,
           { generation, machineId, state: cleaned ? 'finished' : 'unknown', cleaned, ...(hostOnly ? { hostCleaned: true } : {}), ...delivery });
-      } finally { release?.(); this.liveRecordings.delete(machineId); }
+      } finally { release?.(); }
       if (!this.captureJournals.blocked && (cleaned || hostOnly)) {
         try { await this.reportVideoReceipt('video', machineId, recordingId, generation); }
         catch { this.log('Video cleanup receipt was not acknowledged; its reservation is retained.'); }

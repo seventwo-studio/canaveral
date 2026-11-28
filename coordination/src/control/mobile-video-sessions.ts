@@ -233,8 +233,8 @@ export class MobileVideoSessions implements ControlModule {
    * preempted capture retains its own reservation until positive cleanup. */
   private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): void {
     const machine = String(m.id), host = String(m.host);
-    this.requireExclusive(db, machine, 'live');
     this.requireCaptureHost(db, host);
+    this.requireExclusive(db, machine, 'live');
     if (this.conflict(db, machine, 'record')) fail(409);
     const available = this.machines.remainingCapacity(db, host);
     const short = (freed: number): number => this.slots(db, host) - freed >= 4 ? 429

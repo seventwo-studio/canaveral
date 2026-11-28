@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { identifier } from './consumers.ts';
 import { captureJournalRefusal } from './mobile-live.ts';
 import { noLinks, present, readRecord, saveRecord, unknownOutcome } from './runtime-process.ts';
@@ -8,6 +9,7 @@ import { strictJson } from './strict-json.ts';
 type Kind = 'live' | 'video';
 type Saved = Record<string, unknown>;
 type Journal = { kind: Kind; id: string; path: string; machineId: string; generation: string };
+type ObservedJournal = Journal & { saved: Saved };
 const kinds = ['live', 'video'] as const;
 const uuid = (value: unknown): string => {
   if (identifier(value) !== value) throw new Error('Expected a canonical UUID.');
@@ -34,11 +36,14 @@ function validate(kind: Kind, saved: Saved): void {
 }
 
 export class CaptureJournals {
-  private readonly entries = new Map<string, Journal>();
+  private readonly entries = new Map<string, ObservedJournal>();
   private readonly stamps = new Map<string, string>();
   private readonly problems = new Map<string, string>();
+  private readonly marker: string;
 
-  constructor(private readonly state: string, private readonly log: (message: string) => void) {}
+  constructor(private readonly state: string, private readonly log: (message: string) => void) {
+    this.marker = join(state, 'capture-journal-uncertain.json');
+  }
 
   get blocked(): boolean { return this.problems.size !== 0; }
   get issues(): ReadonlyMap<string, string> { return this.problems; }
@@ -47,17 +52,35 @@ export class CaptureJournals {
     if (this.blocked) throw captureJournalRefusal();
   }
 
-  private fault(path: string, reason: string): void {
+  private fault(path: string, reason: string, persist = true): void {
     if (this.problems.has(path)) return;
+    if (!this.blocked && persist) {
+      try { saveRecord(this.marker, { path, reason }); }
+      catch {
+        this.problems.set(this.marker, 'Could not persist capture journal refusal.');
+        this.log('Could not persist capture journal refusal. Keep the runner out of service until operator recovery.');
+      }
+    }
     this.problems.set(path, reason);
     this.log(`Capture journal refusal at ${JSON.stringify(path)}: ${reason}`);
   }
 
   private directory(kind: Kind): string { return join(this.state, 'work', kind); }
 
-  /** Inspect both directories before replay. A refusal stays latched for this process. */
+  /** Inspect both directories before replay. Only operator recovery clears a refusal. */
   scan(): void {
     if (this.blocked) return;
+    try {
+      noLinks(this.marker);
+      if (present(this.marker)) {
+        readRecord(this.marker, undefined, strictJson);
+        this.fault(this.marker, 'Capture journal refusal requires operator recovery.', false);
+        return;
+      }
+    } catch {
+      this.fault(this.marker, 'Cannot read the capture journal refusal marker.', false);
+      return;
+    }
     const found = new Set<string>();
     const byId = new Map<string, string>();
     for (const kind of kinds) {
@@ -111,11 +134,17 @@ export class CaptureJournals {
           continue;
         }
         const previous = this.entries.get(id);
-        if (previous && (previous.machineId !== machineId || previous.generation !== generation || previous.path !== path)) {
-          this.fault(path, 'Capture journal location, device or generation changed.');
+        if (previous) {
+          if (previous.path !== path || !isDeepStrictEqual(previous.saved, saved)) {
+            this.fault(path, 'Capture journal changed outside a runner transition.');
+            continue;
+          }
+        } else if (saved.state === 'attaching') {
+          // A restored attaching journal is indistinguishable from one rolled back after dispatch.
+          this.fault(path, 'An attaching journal from outside this runner cannot prove capture never started.');
           continue;
         }
-        this.entries.set(id, { kind, id, path, machineId, generation });
+        this.entries.set(id, { kind, id, path, machineId, generation, saved });
         this.stamps.set(path, stamp);
       }
     }
@@ -131,10 +160,10 @@ export class CaptureJournals {
     return saved;
   }
 
-  private read(entry: Journal): Saved {
+  private read(entry: ObservedJournal): Saved {
     const saved = this.readBody(entry.kind, entry.path);
-    if (saved && (saved.machineId !== entry.machineId || saved.generation !== entry.generation)) {
-      this.fault(entry.path, 'Capture device or generation changed.');
+    if (saved && !isDeepStrictEqual(entry.saved, saved)) {
+      this.fault(entry.path, 'Capture journal changed outside a runner transition.');
     }
     this.requireReady();
     return saved!;
@@ -151,19 +180,34 @@ export class CaptureJournals {
   }
 
   load(kind: Kind, machineId: string, id: string, generation: string): { path: string; saved: Saved } | undefined {
-    const entry = this.entry(kind, uuid(machineId), uuid(id), uuid(generation));
-    return this.entries.has(entry.id) ? { path: entry.path, saved: this.read(entry) } : undefined;
+    this.entry(kind, uuid(machineId), uuid(id), uuid(generation));
+    const entry = this.entries.get(id);
+    return entry && { path: entry.path, saved: this.read(entry) };
   }
 
   save(kind: Kind, id: string, saved: Saved): void {
     this.scan();
     const entry = this.entry(kind, uuid(saved.machineId), uuid(id), uuid(saved.generation));
-    const exists = this.entries.has(entry.id), creating = saved.state === 'attaching';
-    if (creating ? exists : !exists) throw unknownOutcome('Capture journal cannot be created or replaced out of order.');
-    if (exists) this.read(entry);
+    const previous = this.entries.get(entry.id);
+    if (previous ? saved.state === 'attaching' : saved.state !== 'attaching') {
+      throw unknownOutcome('Capture journal cannot be created or replaced out of order.');
+    }
+    if (previous) {
+      const current = this.read(previous);
+      // Once capture ends, only receipt compatibility and independent device stop proof can be added.
+      if ((current.state === 'finished' || current.state === 'unknown') &&
+          !isDeepStrictEqual({ ...current, ...(saved.legacyReceipt ? { legacyReceipt: true } : {}),
+            ...(saved.deviceStopped ? { deviceStopped: true } : {}) }, saved)) {
+        throw unknownOutcome('Capture journal cannot change settled capture evidence.');
+      }
+    }
     validate(kind, saved);
-    saveRecord(entry.path, saved);
-    this.entries.set(entry.id, entry);
+    try { saveRecord(entry.path, saved); }
+    catch {
+      this.fault(entry.path, 'Could not durably save the capture journal.');
+      this.requireReady();
+    }
+    this.entries.set(entry.id, { ...entry, saved: structuredClone(saved) });
   }
 
   forDevice(kind: Kind, machineId: string): { id: string; saved: Saved }[] {

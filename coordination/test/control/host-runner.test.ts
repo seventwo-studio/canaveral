@@ -12,7 +12,7 @@ import { normalizeTemplate } from "../../src/control/templates.ts";
 import { validateOffer } from "../../src/control/machines.ts";
 import { assignmentFingerprint, readRecord, saveRecord, StateLock } from "../../src/runtime-process.ts";
 import type { ExecutionClock, RecordValue } from "../../src/runtime-process.ts";
-import { ServiceError } from "../../src/errors.ts";
+import { object, ServiceError } from "../../src/errors.ts";
 import { AndroidProvider } from "../../src/providers/android.ts";
 import { IosProvider } from "../../src/providers/ios.ts";
 import { digest } from "../../src/providers/mobile.ts";
@@ -593,13 +593,13 @@ test("a finished recording whose receipt the runner repeats does not hold back t
   t.after(() => runner.close().catch(() => {}));
   await runner.initializeProviders(); await runner.connect(); await runner.poll();
   saveRecord(join(config.stateDir, "work", "video", `${m.id}.${finished.id}.json`), { generation: finished.generation, machineId: m.id, state: "finished", cleaned: true });
-  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean; active: Map<string, unknown>; liveRecordings: Map<string, unknown> };
+  const internals = runner as unknown as { stepVideo(): void; capturePending(kind: 'video', machineId: string): boolean; active: Map<string, unknown> };
   internals.stepVideo(); await drain();
   assert.equal(receipts, 1); assert.ok(internals.active.has(`video:${finished.id}`), "the receipt repeat is in flight");
-  assert.equal(internals.recordingPending(String(m.id)), false, "a recording that ended here does not stop the device's live epoch");
+  assert.equal(internals.capturePending('video', String(m.id)), false, "a recording that ended here does not stop the device's live epoch");
   // A recording the runner has not started yet still keeps live capture off the device.
-  videoSessions = [finished, queued]; await runner.poll(); internals.liveRecordings.clear();
-  assert.equal(internals.recordingPending(String(m.id)), true);
+  videoSessions = [finished, queued]; await runner.poll();
+  assert.equal(internals.capturePending('video', String(m.id)), true);
 });
 
 test("an older controller receives live cleanup without fence attribution, including on retry", async t => {
@@ -650,20 +650,21 @@ test("a host-only recording receipt keeps the device held even when a heartbeat 
   t.after(() => runner.close().catch(() => {}));
   await runner.initializeProviders(); await runner.connect(); await runner.poll();
   saveRecord(join(config.stateDir, "work", "video", `${m.id}.${unproven.id}.json`), { generation: unproven.generation, machineId: m.id, state: "unknown", cleaned: false, hostCleaned: true });
-  const internals = runner as unknown as { stepVideo(): void; recordingPending(machineId: string): boolean };
+  const internals = runner as unknown as { stepVideo(): void; capturePending(kind: 'video', machineId: string): boolean };
   internals.stepVideo(); await drain();
   assert.equal(receipts, 1, "the host-only receipt is in flight");
-  assert.equal(internals.recordingPending(String(m.id)), true);
+  assert.equal(internals.capturePending('video', String(m.id)), true);
   // Acknowledging encoder exit leaves the guest recorder unproven.
   release(); await drain(); await runner.poll();
-  assert.equal(internals.recordingPending(String(m.id)), true);
+  assert.equal(internals.capturePending('video', String(m.id)), true);
   // A stale queue can omit the recording. Only proof (or removal of this device)
   // clears its durable native reservation.
   videoSessions = []; await runner.poll();
-  assert.equal(internals.recordingPending(String(m.id)), true);
+  assert.equal(internals.capturePending('video', String(m.id)), true);
   saveRecord(join(config.stateDir, "work", "video", `${m.id}.${unproven.id}.json`), {
     generation: unproven.generation, machineId: m.id, state: "finished", cleaned: true,
   });
   await runner.poll();
-  assert.equal(internals.recordingPending(String(m.id)), false);
+  assert.equal(internals.capturePending('video', String(m.id)), true, "an external edit cannot supply cleanup proof");
+  assert.equal(object(runner.captureHealth().capabilities).captureJournalsReady, false);
 });

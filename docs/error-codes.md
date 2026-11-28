@@ -126,7 +126,7 @@ status.
 | `unsupported` | receipt | The host does not support the requested upkeep operation | Choose a host and platform with that capability |
 | `update_fenced` | receipt | A pending host update prevented the runner from starting upkeep | Wait for the update and confirm host readiness before retrying |
 | `upkeep_unsupported` | 409, receipt | The host does not offer runtime or storage upkeep for this platform | Choose a host with the required upkeep capability |
-| `capture_journal_uncertain` | 409, receipt, client | Uncertain capture journals disable recording and live views across a host | An operator must verify capture stopped, clear the affected journals and restart the runner |
+| `capture_journal_uncertain` | 409, receipt, client | Uncertain capture journals disable recording and live views across a host | An operator must verify capture stopped, clear the affected journals and refusal marker, and restart the runner |
 | `device_live_view_active` | 409, client | A live view or its unproven capture cleanup holds the device | Retry recording after all views end and cleanup is confirmed |
 | `device_recording_active` | 409, client | A recording or its unproven cleanup holds the device | Retry the live view after recording ends and cleanup is confirmed |
 | `capture_cleanup_pending` | 409 | A prior live capture or recording has ended and its stop proof is still pending | Wait for the host to report cleanup before requesting another capture |

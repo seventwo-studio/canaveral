@@ -153,6 +153,7 @@
             "session_incomplete",
             "device_live_view_active",
             "device_recording_active",
+            "capture_journal_uncertain",
             "upload_publication_uncertain",
             "tunnel_mapping_failed",
             "tunnel_mapping_lost",
