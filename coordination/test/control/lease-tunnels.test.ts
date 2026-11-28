@@ -42,8 +42,8 @@ import type { TunnelChannel, TunnelEnd } from "../../src/tunnel-relay.ts";
  * Integration tests use a real loopback controller, a real HostRunner with the native lease
  * clock and the real `lease-supervise` helper, and the real SDK relaying bytes between a stand-in
  * device and local servers. They need the built `canaveral-mobile-native` helper and are skipped
- * without it. CI's "TypeScript controller, SDK and guest services" job builds that helper before
- * `npm test`, so they run there; the first test below fails in CI if the helper is missing, so a
+ * without it. CI's "TypeScript timing-sensitive suites" job builds that helper and runs this file
+ * through `npm run test:timed`, so they run there; the first test below fails in CI if the helper is missing, so a
  * broken build path cannot turn them into silent skips.
  *
  * adb is a stand-in that keeps a live mapping registry and really connects mapped ports to the
@@ -1070,7 +1070,9 @@ test("connections are bounded, a stalled endpoint applies backpressure, idle con
   let dropped = Date.now();
   h.device(a.machineId)!.reverse.delete(8085);
   let gone = await vanishing.closed;
-  assert.deepEqual([gone.endReason, gone.state], ["mapping_lost", "disconnected"]);
+  assert.equal(gone.state ?? "disconnected", "disconnected");
+  // `closed` reads the record once; the runner's reason may land just after it.
+  await until(async () => (await lease.tunnels.inspect(vanishing.id)).endReason === "mapping_lost", "the lost reverse mapping's reason");
   assert.ok(Date.now() - dropped < 6000, `the lost reverse mapping was noticed after ${Date.now() - dropped} ms`);
   await through.finished();
   await deviceListen(t, h, a.machineId, 9002, serve);
@@ -1078,7 +1080,8 @@ test("connections are bounded, a stalled endpoint applies backpressure, idle con
   dropped = Date.now();
   for (const [local, entry] of [...h.device(a.machineId)!.forward]) if (entry.port === 9002) { for (const socket of entry.sockets) socket.destroy(); entry.server.close(); h.device(a.machineId)!.forward.delete(local); }
   gone = await forwarded.closed;
-  assert.deepEqual([gone.endReason, gone.state], ["mapping_lost", "disconnected"]);
+  assert.equal(gone.state ?? "disconnected", "disconnected");
+  await until(async () => (await lease.tunnels.inspect(forwarded.id)).endReason === "mapping_lost", "the lost forward mapping's reason");
   assert.ok(Date.now() - dropped < 6000, `the lost forward mapping was noticed after ${Date.now() - dropped} ms`);
   for (const ended of [vanishing, forwarded]) await until(async () => (await lease.tunnels.inspect(ended.id)).mappingRemoved === true, "the lost tunnel's settlement");
   assert.deepEqual([(await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state, (await lease.tunnels.inspect(quiet.id)).state], ["ready", "ready"]);
@@ -1355,15 +1358,51 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
     return pending;
   });
   // Its own host attaches at the next heartbeat, and the tunnel works.
-  const first = await holder.tunnels.connect(pending, { target: { port: echo.port } });
+  const stale = await holder.tunnels.connect(pending, { target: { port: echo.port } });
+  const staleReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
+  staleReader.socket.write("ECHO up\n"); assert.equal(await staleReader.line(), "echo up");
+
+  // The runner loses controller contact: its last heartbeat is suddenly older than the freshness
+  // window. Nothing else changed. The device runs, its lease guard and supervisor hold, and the
+  // controller and its broker still consider the tunnel authorized. Only the runner's own tunnel
+  // authority (HostRunner.tunnelAuthorized) can end this tunnel, and it does so within a second.
+  // Heartbeats are held while this is observed, so no heartbeat can restore contact, confirm a
+  // removal or tell the controller anything in between: what happens is the runner's own doing.
+  const supervisorOf = (lease: Lease) => JSON.parse(readFileSync(join(h.storage(lease.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
+  await heartbeat();
+  await withoutHeartbeat(async () => {
+    assert.equal(staleReader.finishedAt, undefined);
+    const since = performance.now();
+    runner.lastContact -= 60;
+    assert.equal(runner.fresh(), false);
+    await staleReader.finished(10000);
+    const elapsed = staleReader.finishedAt! - since;
+    t.diagnostic(`lost controller contact: the device's connection closed after ${elapsed} ms`);
+    assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+    assert.notEqual((await stale.closed).reason, "closed");
+    assert.equal(runner.guard.allowed(fenced.machineId), true, "the lease guard never fenced");
+    const group = supervisorOf(fenced);
+    assert.ok(alive(group.supervisorPid) && alive(group.childPid), "the device kept running");
+    assert.equal(await leaseState(fenced), "ready", "the lease continues");
+
+    // The ended tunnel keeps its port until the runner can prove removal.
+    await until(async () => (await holder.tunnels.inspect(pending.id)).state === "disconnected", "the ended tunnel's state");
+    assert.equal((await holder.tunnels.inspect(pending.id)).mappingRemoved, false);
+    await refused(holder.tunnels.create({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081 }), 409, "tunnel_port_busy");
+    assert.equal(runner.fresh(), false, "no heartbeat arrived meanwhile");
+  });
+  // With contact restored, the runner retries removal and the same port opens under a new UUID.
+  await until(async () => (await holder.tunnels.inspect(pending.id)).mappingRemoved === true, "the runner's retried removal", 30000);
+  assert.deepEqual(mappingsOf(h, fenced.machineId).reverse, []);
+  const first = await holder.tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
   const firstReader = new Reader(await deviceConnect(h, fenced.machineId, 8081));
   firstReader.socket.write("ECHO up\n"); assert.equal(await firstReader.line(), "echo up");
   const second = await client(h, orphaned).tunnels.open({ id: randomUUID(), member: "primary", direction: "reverse", devicePort: 8081, target: { port: echo.port } });
   const secondReader = new Reader(await deviceConnect(h, orphaned.machineId, 8081));
   secondReader.socket.write("ECHO up\n"); assert.equal(await secondReader.line(), "echo up");
 
-  // The runner's lease guard fences the lease locally, as it does at its own deadline or without
-  // controller contact. Hold the heartbeat so only local evidence can close the tunnel.
+  // Hold the heartbeat to measure local fencing. Both tunnel authority and reconciliation
+  // observe the fence, so this bound applies to the runner as a whole.
   await heartbeat();
   await withoutHeartbeat(async () => {
     assert.equal(firstReader.finishedAt, undefined);
@@ -1372,14 +1411,14 @@ test("the runner ends a tunnel on its own evidence before the controller can kno
     await firstReader.finished(10000);
     const elapsed = firstReader.finishedAt! - since;
     t.diagnostic(`local fence: the device's connection closed after ${elapsed} ms`);
-    assert.ok(elapsed < 1000, `the runner's own authority check took ${elapsed} ms`);
+    assert.ok(elapsed < 1000, `the runner's local fence took ${elapsed} ms`);
     assert.notEqual((await first.closed).reason, "closed");
     assert.equal(await leaseState(fenced), "ready", "the controller had not been told yet");
   });
 
   // The supervisor dies. The runner's once-a-second device check sees the free lock and ends the tunnel.
   await heartbeat();
-  const group = JSON.parse(readFileSync(join(h.storage(orphaned.machineId), "lease-supervisor.json"), "utf8")) as { childPid: number; supervisorPid: number };
+  const group = supervisorOf(orphaned);
   await withoutHeartbeat(async () => {
     assert.equal(secondReader.finishedAt, undefined);
     const since = performance.now();

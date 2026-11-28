@@ -1449,8 +1449,10 @@ export class HostRunner {
    * guard's deadline, the assignment, and the host's own tunnel gate. Contact freshness and the
    * lease guard each sample the native clock, which is a process spawn, and the session channel
    * asks on every frame it relays. The result is therefore shared per machine and re-evaluated at
-   * most every 250 ms, the same bound as the channel's own watcher. The controller's broker still
-   * checks its authority on every relayed message. */
+   * most every 250 ms, the same bound as the channel's own watcher. The controller's broker checks
+   * its own authority for the pair on the same interval (control/sessions.ts), not per message.
+   * Lost controller contact is the one cause nothing else on this runner acts on: the device,
+   * its lease guard and its supervisor are unaffected, so this check alone ends the tunnel. */
   private tunnelAuthorized(machineId: string, leaseId: string): boolean {
     const cached = this.tunnelAuthority.get(machineId), now = performance.now();
     if (cached && now - cached.at < 250) return cached.allowed;

@@ -91,11 +91,22 @@ for its Android lease images. The declaration is separate and explicit:
   and `leaseProtocol: 1` alone never implies them.
 - It is refused without `leaseProtocol: 1`, with any value other than 1, and on a runner
   whose Android storage path cannot hold a tunnel socket.
+- It is refused when the host also offers an Android template that is not one of its
+  lease images, by the runner at startup and by the controller for the offer. A host that
+  declares tunnels runs leased and supervised warm Android emulators only: the host's adb
+  server is reachable by every local process and by an emulator without lease isolation,
+  and through it a reverse tunnel reaches the lease holder's machine
+  ([boundary](mobile-control.md#boundary)). Offering both on one host needs a
+  runner-private adb server, which is not implemented.
+- It also turns on the adb mapping check of lease readiness. A host without the
+  declaration behaves as before tunnels and does not detect a reverse mapping that other
+  adb tooling created ([readiness](mobile-control.md#readiness)).
 - The controller requires it when a tunnel is opened and on every later authority check.
   Withdrawing it ends the affected tunnels (`disconnected`) like a withdrawn image
   selector ends sessions. The runner enforces its own declaration independently.
-- It is a runner contract, not evidence of native acceptance; tunnels have fixture
-  coverage only.
+- It is a runner contract, not evidence of native acceptance. One
+  [native trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels)
+  carried a single request each way; everything else has fixture coverage only.
 
 An application additionally needs `limits.tunnelsPerLease` above zero
 ([applications](applications.md)).

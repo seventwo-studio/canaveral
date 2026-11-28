@@ -650,9 +650,11 @@ A leased emulator reports `running` with `accessReady: true` only after all of t
    Isolation is proven only when every attempt fails with exit status 1 and a
    recognized connection error, and the canary saw no connection. The result is
    recorded in `lease-isolation.json` for that launch.
-5. The device holds no adb port mapping that a lease tunnel did not create. The runner
-   reads `adb reverse --list` and `adb forward --list` for the serial. Before readiness
-   both must be empty, because a tunnel needs a ready lease.
+5. On a host that declares lease tunnels (`leaseTunnelProtocol: 1`), the device holds no
+   adb port mapping that a lease tunnel did not create. The runner reads
+   `adb reverse --list` and `adb forward --list` and judges the entries of the lease's own
+   serial. Before readiness there must be none, because a tunnel needs a ready lease. A
+   host that does not declare tunnels skips this step and never lists mappings.
 
 Until then the emulator reports `starting` with a detail; an inconclusive probe (for
 example, `nc` missing) keeps it starting until the provisioning timeout fails the
@@ -672,9 +674,9 @@ because there is nothing to probe: its readiness is described under
 launch and proves one thing: the guest's own network stack cannot reach the host's
 loopback. It says nothing about adb port mappings, which do not use the guest's network. A
 reverse mapping gives the guest a path through its adb daemon to whatever host endpoint
-the mapping names, and the probe would still pass. The mapping check (step 5) covers that
-path instead, and it repeats on every reconcile, at most once a second, for as long as the
-lease is ready:
+the mapping names, and the probe would still pass. On a host that declares tunnels the
+mapping check (step 5) covers that path instead, and it repeats on every reconcile, at
+most once a second, for as long as the lease is ready:
 
 - An entry that belongs to one of the lease's open tunnels (same device port, and the
   tunnel's own socket inside the lease's storage) is expected.
@@ -688,8 +690,21 @@ lease is ready:
 - If a list cannot be read, the device reports `starting` until it can, as for the other
   readiness checks.
 
-A lease without an open tunnel therefore has no mapping, and a lease with open tunnels has
-exactly theirs.
+`adb forward --list` lists the whole adb server. The runner keeps only the lines of the
+lease's own serial before it judges anything, so another device's entry, readable or not,
+never affects this lease.
+
+**Known gap on a host without tunnels.** A host that does not declare
+`leaseTunnelProtocol` behaves exactly as it did before tunnels existed: step 5 does not
+run there, and no mapping is listed or judged. A reverse mapping that other adb tooling
+creates on a leased device of such a host is therefore not detected, and it gives that
+guest a path to the host endpoint the mapping names. The gap is older than tunnels; the
+mapping check closes it only on hosts that declare them. On every lease host, do not run
+other adb tooling against leased devices.
+
+A lease's live tunnels therefore have exactly their own mappings. An ended tunnel whose
+removal is not yet proven can leave its mapping behind, inert, until the runner confirms
+the removal (see [lifetime and teardown](#lifetime-and-teardown)).
 
 ### Scoped control
 
@@ -889,11 +904,25 @@ no route to the machine that runs the device, and the device host opens no inbou
   other lease action. Slirp stays `restrict=on`; nothing is added to the emulator launch.
 - **The host-side endpoint is a Unix domain socket in the lease's private storage**,
   `<storage>/<machine>/t/<name>.sock`, in a directory of mode 0700 that cleanup removes
-  with the lease. It is not a loopback TCP port. Only a process running as the runner's own
-  user, or root, can connect to it. Other users cannot, and another lease's guest has no
-  path to the host filesystem at all. Processes of the runner's own user are not separated
-  from it: they could already drive the device through adb. The adb server must run as
-  the runner's user; the runner starts it during its environment check.
+  with the lease. It is not a loopback TCP port, so a tunnel adds no listener to the
+  device host's network, and another user cannot open the socket file itself. Another
+  lease's guest has no path to the host filesystem at all. The adb server must run as the
+  runner's user; the runner starts it during its environment check.
+- **That directory is not the access boundary; the host's adb server is.** The adb server
+  listens on `127.0.0.1:5037` without authentication. Any local process on the device
+  host, of any user, can ask it for a connection to a port of any attached device. Asking
+  for a reverse tunnel's device port reaches the lease holder's target through the tunnel.
+  The mapping check does not see this, because such a connection creates no mapping.
+  Driving a leased device through that adb server was possible before tunnels; a reverse
+  tunnel adds that the path can end on the holder's machine. A forward tunnel adds nothing
+  there, since local processes could already reach any device port. A leased guest cannot
+  take this path, because it has no route to the host's loopback (the readiness probe
+  includes port 5037). An emulator started without the lease isolation arguments could,
+  which is why a tunnel host runs no account-owned Android device
+  ([Enabling](#enabling)). **Every local process on a host that declares tunnels must be
+  trusted with whatever its tunnels expose**, so use a dedicated device host. A
+  runner-private adb server would remove this dependency. It is not implemented
+  ([limits and open questions](#limits-and-open-questions)).
 - **The device never chooses a destination.** A reverse mapping names one device port and
   one socket; the runner creates it and the adb daemon of a user build holds it, where an
   app cannot change it. No message of the relay protocol carries a host, port or path:
@@ -922,12 +951,16 @@ Tunnels are off unless both of these are set.
 - **Application.** The policy sets `limits.tunnelsPerLease` to 1–8. It defaults to 0, so
   existing immutable policies allow no tunnels ([applications](applications.md)).
 
-A tunnel host serves leased and supervised warm Android devices. The controller excludes
-account-owned Android devices from placement, and the runner refuses to start them on
-that host. They can reach the shared adb server because they lack lease network isolation.
-A warm device must pass the isolation and mapping checks. Tunnels become available after
-a lease adopts the device, rechecks its mappings, and reports it ready.
-Mixed hosts need a runner-private adb server, which remains open.
+A tunnel host serves leased and supervised warm Android devices only. A host
+configuration that declares tunnels and also offers an Android template that is not a
+lease image is refused at startup, and the controller refuses such an offer. The
+controller also excludes account-owned Android devices from placement on a tunnel host,
+and the runner stops and reports one it is nevertheless assigned. Such a device lacks the
+lease network isolation, so it can reach the shared adb server, and through it a reverse
+tunnel ([Boundary](#boundary)). A warm device must pass the isolation and mapping checks.
+Tunnels become available after a lease adopts the device, rechecks its mappings, and
+reports it ready. A host that must offer both needs a runner-private adb server, which
+remains open.
 
 #### Routes
 
@@ -997,7 +1030,8 @@ attached; the runner then sends `{type:"tunnel", direction, devicePort}`, and th
 | Tunnels per host | 64 | 429 `tunnel_host_limit` |
 | Connections per tunnel | 32 | A further connection is closed at once |
 | New connections | Burst of 64, then 16 per second | Extra opens are refused |
-| Connection attempts | Burst of 512, then 64 per second | A sustained flood ends the tunnel |
+| Connection attempts | Burst of 512, then 64 per second | A sustained flood ends the tunnel; when the runner saw it, with `endReason: "open_rate"` |
+| Broker relay budget | 2 MiB, 256 messages and 32 stream opens per direction between two authority checks, 250 ms apart | The relay waits for the next successful check |
 | Buffered bytes | 256 KiB unacknowledged per connection and direction | The sender stops; backpressure reaches the writing socket |
 | Idle time | `idleSeconds` without a byte in either direction | That connection is reset; the tunnel stays open |
 | Connect time | 10 seconds to reach the endpoint | That connection is reset |
@@ -1016,7 +1050,9 @@ pair. A tunnel reserves no host capacity.
 A tunnel exists only while the holder stays attached. It ends when the holder closes it or
 disconnects, and with its lease: expiry, release, failure, a fence, a key rotation and
 supervisor loss each end it within about a second, as they end a lease recording. That
-bound follows from the checks below. Fixtures confirm teardown within seconds on a shared
+bound follows from the checks below. The fixtures assert it: under one second for a key
+rotation, a release, a local fence and lost controller contact, and under two for
+supervisor loss, which only the once-a-second device check shows. They run on one shared
 event loop; the native timing is not measured.
 
 **These bounds hold under normal load; they are not hard real-time.** A starved CPU or
@@ -1028,11 +1064,23 @@ duration and exit grace are counted in wall time. The test suite runs its timing
 files as their own group, one file at a time (`npm run test:timed`, which `npm test`
 runs after the rest and CI runs as a separate job; see `script/coordination_tests.mjs`).
 
-- The broker checks tunnel authority up to four times a second using the lease key,
-  application, lease, assignment and host state. Per direction and check interval it
-  forwards at most 2 MiB, 256 messages and 32 opens. A revocation can therefore leave
-  at most one interval and its relay budget in flight. A busy controller pauses relay
-  once the current budget expires.
+- The broker checks a tunnel's authority on an interval, not for every relayed message:
+  the lease key, application, lease, assignment and host state, at most about five times
+  a second per tunnel. It relays nothing unless an affirmative reply arrived within the last 250 ms,
+  and between two replies it forwards at most 2 MiB, 256 messages and 32 stream opens per
+  direction. The window and budget start when the broker receives the reply, not when the
+  controller sampled authority. A revocation can therefore leave up to 250 ms and 2 MiB per
+  direction in flight after the last affirmative reply is received, including a reply
+  that was sampled before the revocation and arrived after it. Other session families
+  check each message; a controller round trip for every tunnel
+  message would let one lease starve the control worker that requests, heartbeats and
+  all other sessions share. The check reads a snapshot and takes no write lock; only
+  an end of authority writes. A busy or briefly unavailable controller is backpressure,
+  not an end: relay stops when the interval runs out and resumes with the next successful
+  check. Only a definite refusal, or consecutive transient failures spanning about ten seconds,
+  ends the pair. A single check can itself wait up to 20 seconds for the control worker,
+  so a pair whose checks hang rather than fail can stay paused longer than ten seconds
+  before it ends; it relays nothing while paused.
 - The runner evaluates fresh controller contact, its lease guard and its own tunnel gate
   once per lease at most every 250 ms, and each relay polls that result every 250 ms. It
   is not evaluated per frame, because each evaluation samples the native clock through a
@@ -1054,14 +1102,49 @@ the mapping and unlinks its socket. `mappingRemoved` in the receipt is positive 
 - The **lease's own cleanup** proved the emulator's process group gone and its storage
   removed. A reverse mapping cannot outlive the emulator.
 
-Until then an ended tunnel keeps its host slot and device port (`tunnel_port_busy`).
-The runner checks for missing mappings while a tunnel is open. Dedicated tunnel hosts
-also audit unexpected mappings during readiness.
+Until then an ended tunnel keeps its host slot and its device port and direction
+(`tunnel_port_busy`). It does not count toward `limits.tunnelsPerLease`, which counts
+live tunnels only. A lease with eight unproven removals is refused new tunnels (`tunnel_residue_limit`)
+until the runner confirms some. Eight is an admission threshold, not a cap: live tunnels
+that end later without proof add to the count, so a lease can hold more than eight. A
+device port is reusable only once its own removal is proven, and a new tunnel on any
+port can still be refused by the residue threshold or the host's limits.
 A mapping whose removal is unproven is inert: its socket is closed and unlinked, and the
 socket name is derived from the tunnel's UUID and never reused, so the device port leads
-nowhere. The runner retries the removal on its next mapping audit and reports it. After a
-runner restart the same applies: the journal forbids a second install, the audit removes
-the leftover mapping, and the restarted runner reports the removal.
+nowhere. The runner keeps retrying for as long as it holds the lease's device. Every
+mapping audit, about once a second, removes leftover entries of the lease's own socket
+directory. About every five seconds the runner re-reads the list for each unconfirmed
+tunnel and reports the removal once the entry is gone. After a runner restart the same
+applies: the journal forbids a second install, the audit removes the leftover mapping, and
+the restarted runner reports the removal.
+
+**A mapping that disappears ends its tunnel.** An adb server restart drops forward
+listeners, and a reset of the device's adb transport drops reverse mappings. About once a
+second the runner compares each open tunnel with a readable mapping list. A tunnel whose
+mapping is positively missing ends `disconnected` with `endReason: "mapping_lost"`, and
+the holder's relay receives the worker error `tunnel_mapping_lost`. It no longer stays
+`ready` while carrying nothing. A list that cannot be read proves nothing and ends no
+tunnel by itself.
+
+**What a holder should expect after a readiness loss.** When the lease's device stops
+being ready, for example because its adb transport dropped or a mapping list could not
+be read, every tunnel of that lease ends, usually `disconnected`. Nothing reconnects:
+the SDK and the CLI report the end and stop. The runner often cannot reach the device at
+that moment, so the removals of those tunnels start out unproven. From there:
+
+- If the device becomes ready again, the lease continues. Open a new tunnel with a new
+  UUID. The same device port and direction answer `tunnel_port_busy` until the ended
+  tunnel's `mappingRemoved` turns true, which should take seconds once the device is
+  reachable. Another device port is available at once. An open during the interruption
+  answers `member_not_ready`.
+- If the lease loses readiness repeatedly before removals are confirmed, it reaches
+  `tunnel_residue_limit` at eight and waits for the runner. The limit clears as removals
+  are confirmed. A device whose mappings can never be removed keeps it for the rest of
+  the lease; release that lease and acquire a new one. A lease also creates at most 256
+  tunnel identities per rolling hour (`tunnel_identity_limit`). That window moves, so it
+  never stops a long lease for good.
+- If the device does not come back, the lease fails by its ordinary rules and its cleanup
+  proof settles every mapping.
 
 **A tunnel never holds a reservation and never delays cleanup.** Lease cleanup closes the
 member's tunnel endpoints first, without device access and for at most five seconds, and
@@ -1107,11 +1190,27 @@ the command exits non-zero and names the reason.
   its reconcile loop also uses for synchronous file writes and helper calls, about ten
   times a second per leased emulator. In the single-process fixture on the development Mac
   one tunnel carried about 3 to 7 MiB/s with one emulator on the runner, and sometimes
-  only a few hundred KiB/s with two. The controller's per-message check was not the
-  limit. Moving the relay off the runner's main loop is the likely remedy if a real
-  bundle download is too slow.
-- A reverse tunnel can expose a holder-side proxy. That proxy determines which
-  destinations the guest can reach through the tunnel.
+  only a few hundred KiB/s with two. Those figures predate the broker's interval check
+  and its relay budget, which caps one tunnel at roughly 8 to 10 MiB/s per direction;
+  the controller was not the limit when they were taken. Moving the relay off the
+  runner's main loop is the likely remedy if a real bundle download is too slow.
+- **The holder chooses what a reverse tunnel reaches.** The reverse target is checked
+  only for its form, a host and a port, and only in the holder's own SDK or CLI; it never
+  reaches the controller or the runner. A holder can therefore point a reverse tunnel at
+  a proxy on their own machine and give the guest whatever that proxy reaches, the
+  public internet included. "The guest has no internet" holds for the device host's
+  network and for Canaveral's own paths; beyond that it holds only as far as the holder's
+  own choices.
+- **A runner-private adb server is not implemented.** The access boundary of a tunnel is
+  the host's shared adb server on `127.0.0.1:5037` ([Boundary](#boundary)). The proper
+  fix is an adb server that only the runner can reach: started by the runner on a Unix
+  socket in a private directory (`adb -L localfilesystem:<path>`), with every runner adb
+  call directed at it. Local processes and unfenced emulators would then have no path to
+  a leased device or its tunnels, and a host could offer leased and account-owned Android
+  devices together. How such a server learns of the lease's emulator, whether
+  `adb reverse` and `adb forward` behave the same through it, and how it coexists with a
+  default adb server on the same machine can only be settled by a native run. Until then
+  a tunnel host is a dedicated host.
 - **TCP only**, and one port per tunnel. No UDP, no port ranges, no `localabstract` or
   JDWP targets.
 - **Android emulators only.** iOS simulator leases are a separate change; the relay,
@@ -1241,30 +1340,66 @@ grandchild in its group) through fake adb and avdmanager. It covers:
   expiry mid-upload and mid-install (the never-installed upload released at once, the
   interrupted install's upload only after lease cleanup), and application limits.
 
-[lease-tunnels.test.ts](../coordination/test/control/lease-tunnels.test.ts) uses the same
-real controller, `HostRunner`, lease supervisor and SDK. Its stand-in adb keeps a live
-mapping registry and really connects mapped ports to the runner's Unix sockets. It covers:
+[lease-tunnels.test.ts](../coordination/test/control/lease-tunnels.test.ts) has two
+groups of tests.
+
+Its component tests need only Node and run everywhere: the relay multiplexer, the broker
+with a stand-in control client, the controller module on a temporary database, and the
+packaged contracts. They cover:
+
+- the host declaration, including its refusal beside an Android template that is not a
+  lease image, and the serial filter of the server-wide forward list;
+- relay protocol violations, the open rate (extra opens refused one by one) and a
+  sustained flood ending the tunnel with its reason;
+- the broker relaying a stream open only from the side that listens;
+- the broker's interval check: no controller request per message, a busy controller as
+  backpressure, the relay budget, and at most one interval and one budget passing after
+  authority ends;
+- the allowance counting live tunnels only, the residue and hourly identity bounds, and
+  the authority check taking no write lock;
+- only the tunnel's own host attaching and reporting, with another enrolled host that
+  holds a valid credential of its own, a lease key and the application key refused on the
+  attach and receipt routes; an uncertain open that the SDK does not retry.
+
+Its integration tests use the same real controller, `HostRunner`, lease supervisor and
+SDK as the lease tests. Their stand-in adb keeps a live mapping registry, really connects
+mapped ports to the runner's Unix sockets, and can drop a mapping. They cover:
 
 - a reverse tunnel carrying bytes both ways between a stand-in device and a local server,
   and a forward tunnel to a stand-in app on the device, both with half-close, and the
   endpoint's location and permissions inside the lease's storage;
 - refusal without the host declaration (also by the runner's own gate) and without the
-  application limit; refusal of the application key, another lease's key and the operator
-  on every route and on the relay attach; request validation;
-- the per-lease limit, a busy device port, the 32-connection limit, a stalled endpoint
-  that stalls the device's writer while nothing more crosses the relay, and the idle reset;
-- teardown within seconds on key rotation, release, expiry and supervisor loss, with the
-  mapping removed and proven where the lease survives, and settled by lease cleanup where
-  it does not;
+  application limit, with no mapping list ever requested on a host that does not declare
+  tunnels; refusal of the application key, another lease's key and the operator on every
+  route and on the relay attach; request validation;
+- the per-lease limit, a busy device port, the 32-connection limit reached from either
+  side, a stalled endpoint that stalls the device's writer while nothing more crosses the
+  relay, and the idle reset;
+- a reverse and a forward mapping that vanish under an open tunnel, each ending it with
+  `mapping_lost`; another device's unreadable forward entry leaving the lease untouched;
+- teardown inside the documented bounds: under one second on key rotation, release, a
+  local fence and lost controller contact, under two on supervisor loss, and with the
+  lease on expiry; the mapping removed and proven where the lease survives, and settled
+  by lease cleanup where it does not;
 - a replayed open after a lost reply, a runner restart and a controller restart, each
-  with exactly one mapping installed per tunnel; an unconfirmed removal that keeps its slot
-  and port; a device port already bound by an app;
+  with exactly one mapping installed per tunnel; an unproven removal that keeps its port
+  but no place in the allowance, and a retried removal that frees the port; a device port
+  already bound by an app;
 - no mapping and no socket left after a close; the mapping audit before readiness; a
   mapping that no tunnel created fencing the lease; and the isolation probe still fencing
   a leaky guest on a host that declares tunnels;
-- the foreground CLI command, relay protocol violations, and the packaged contracts.
+- the foreground CLI command.
 
-It establishes nothing about a real adb, emulator or app.
+**Which run executes the integration tests.** They need the built
+`canaveral-mobile-native` helper and are skipped without it, so a plain local `npm test`
+runs the tunnel component tests only. The "TypeScript timing-sensitive suites" job
+of the validation workflow builds that helper before `npm run test:timed`. The file's
+first test fails in CI when the helper is missing, so a broken build step cannot turn
+the integration tests into silent skips.
+
+The fixtures establish nothing about a real adb, emulator or app. The one native run is
+the [trial](../coordination/native-acceptance/mobile-parity.md#android-port-tunnels) named
+under [limits and open questions](#limits-and-open-questions).
 
 `lease_supervisor.rs` unit tests cover the lifetime lock, the refusal before spawn, a
 clock failure after spawn that still stops the whole group, and the log cap. They also
