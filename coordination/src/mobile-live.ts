@@ -16,9 +16,16 @@ export const LIVE_EPOCH_SECONDS = 180;
 /** A view's lifetime without renewal: chosen per view within these bounds, default the maximum.
  * A client renews after a third of it. */
 export const LIVE_VIEW_SECONDS = 120, LIVE_VIEW_MIN_SECONDS = 10;
-/** A recording that takes a watched device waits at most this long for the live run's stop
- * proof, then starts regardless. The controller adds it to such a recording's deadline. */
-export const LIVE_HANDOVER_SECONDS = 15;
+/** Shared by admission and native dispatch so both surfaces report the same refusal. */
+export function captureConflict(other: 'live' | 'record'): ServiceError {
+  return other === 'live'
+    ? new ServiceError('A live view still holds this device. Retry recording after the view ends and cleanup is confirmed.', 409, { code: 'device_live_view_active' })
+    : new ServiceError('A recording still holds this device. Retry the live view after the recording ends and cleanup is confirmed.', 409, { code: 'device_recording_active' });
+}
+export function captureJournalRefusal(): ServiceError {
+  return new ServiceError('Capture is disabled on this host until an operator resolves its capture journals and restarts the runner.', 409,
+    { code: 'capture_journal_uncertain', retryable: false });
+}
 export const MAX_LIVE_INIT_BYTES = 1_048_576, MAX_LIVE_SEGMENT_BYTES = 8 * 1_048_576, MAX_LIVE_MOOF_BYTES = 1_048_576;
 /** Why the host ended a stream it was still serving. A host whose own authority ended sends
  * nothing more, so that cause is the controller's to record, with its other reasons. */

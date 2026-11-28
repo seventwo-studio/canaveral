@@ -9,9 +9,7 @@
  *   leaving, or losing authority, ends the epoch like a cancelled recording.
  * - An epoch lasts at most `LIVE_EPOCH_SECONDS` (Android screenrecord's own limit). While viewers
  *   remain, the next epoch starts and they receive a new initialization segment.
- * - A recording has priority. No live epoch starts while a recording of the device is queued or
- *   running. A recording that finds a live epoch running has it stopped and waits a bounded time
- *   for the stop proof before starting. The recording's own stream is also fed to the viewers.
+ * - Live captures and recordings hold mutually exclusive reservations per device.
  * - A failed epoch is never retried. An epoch whose cleanup is unproven ends the capture as
  *   unknown: no positive receipt is sent, so the controller keeps its reservation. An epoch that
  *   provably started nothing native, such as one whose viewer left while its source was still
@@ -22,7 +20,7 @@
 import { ServiceError } from './errors.ts';
 import { serveMobileVideo } from './mobile-video.ts';
 import type { VideoOptions } from './mobile-video.ts';
-import { LIVE_BIT_RATE, LIVE_EPOCH_SECONDS, LIVE_FPS, LIVE_HANDOVER_SECONDS, LiveSegmenter } from './mobile-live.ts';
+import { LIVE_BIT_RATE, LIVE_EPOCH_SECONDS, LIVE_FPS, LiveSegmenter, captureConflict } from './mobile-live.ts';
 import type { LiveHostEndReason, LiveItem } from './mobile-live.ts';
 import type { NativePipe } from './providers/mobile.ts';
 import type { SessionChannel } from './control/session-protocol.ts';
@@ -39,9 +37,6 @@ export interface LiveCaptureSource {
   /** True for an `openSource` rejection after which provably nothing native of that attempt runs:
    * refused before any spawn, or spawned and stopped with proof. Any other rejection is unknown. */
   notRunning(error: unknown): boolean;
-  /** A recording of this device is waiting to start. No live epoch starts meanwhile, so the
-   * recording finds the device free. */
-  recordingQueued?(): boolean;
   /** The local fence of this source's lease, sampled when the running epoch loses authority. */
   leaseFence?(): LeaseCaptureFence | undefined;
 }
@@ -51,13 +46,12 @@ class CaptureFenced extends ServiceError {
   constructor(readonly stop: LeaseCaptureFence) { super('The local lease fence stopped live capture.', 410); }
 }
 export interface LiveHubOptions {
-  load(captureId: string): Record<string, unknown> | undefined;
+  load(captureId: string, machineId: string, generation: string): Record<string, unknown> | undefined;
   save(captureId: string, value: Record<string, unknown>): void;
   /** Delivers the cleanup receipt. A failure is retried later from the saved journal. */
   report(job: LiveCaptureJob, receipt: LiveReceipt): Promise<void>;
-  /** Test seams: the epoch length in seconds, and the hand-over bound in milliseconds. */
+  /** Test seams: the epoch length in seconds. */
   epochSeconds?: number;
-  handoverMs?: number;
 }
 export type LiveViewItem =
   | { type: 'init'; epoch: number; data: Buffer }
@@ -65,12 +59,6 @@ export type LiveViewItem =
   | { type: 'end'; reason: LiveHostEndReason };
 export interface LiveSubscription { next(timeoutMs: number): Promise<LiveViewItem | null>; close(): void }
 export interface LiveCaptureHandle { subscribe(live: () => boolean): LiveSubscription; release(): void }
-export interface RecordingTap {
-  /** How long the recording waited for the device's live epoch to stop, and whether that stop
-   * was proven in time. */
-  waitedMs: number; proven: boolean;
-  push(data: Uint8Array): void; end(cleaned: boolean): void;
-}
 /** Thrown by `acquire`. `journaled` tells whether this runner holds a journal for the capture:
  * only then may it attach as its host, because only then will a cleanup receipt follow. */
 export class LiveCaptureRefused extends ServiceError {
@@ -169,7 +157,7 @@ class Capture {
   private encodersExited = true;
   private fence: LeaseCaptureFence | undefined;
   private lastViewerFence: LeaseCaptureFence | undefined;
-  private running: Promise<void> | undefined;
+  private running = false;
   /** A failed epoch: no further epoch starts while its viewers are being told. */
   private halted = false;
   private waiters: (() => void)[] = [];
@@ -182,10 +170,8 @@ class Capture {
   poke(): void { for (const wake of this.waiters.splice(0)) wake(); }
   /** Conditions such as a viewer's authority change without notice, so waits are also timed. */
   private wait(): Promise<void> { return new Promise(resolve => { const timer = setTimeout(resolve, 250); this.waiters.push(() => { clearTimeout(timer); resolve(); }); }); }
-  /** Resolves once no native epoch of this capture is running. */
-  async settled(): Promise<void> { while (this.running) await this.running; }
   private wanted(): boolean {
-    return !this.closing && !this.ended && !this.halted && !!this.source && !this.hub.recording(this.job.machineId) && this.source.recordingQueued?.() !== true && [...this.subscribers].some(s => !s.closed && s.live());
+    return !this.closing && !this.ended && !this.halted && !!this.source && [...this.subscribers].some(s => !s.closed && s.live());
   }
   private attach(feed: Feed): void {
     this.detach(); this.feed = feed; this.epoch++;
@@ -207,8 +193,7 @@ class Capture {
     this.poke(); return s;
   }
   unsubscribe(s: Subscription): void {
-    if (this.subscribers.delete(s) && !this.subscribers.size && this.running && !this.ended &&
-        !this.hub.recording(this.job.machineId) && this.source?.recordingQueued?.() !== true) {
+    if (this.subscribers.delete(s) && !this.subscribers.size && this.running && !this.ended) {
       this.lastViewerFence = this.source?.leaseFence?.();
     }
     this.poke();
@@ -244,8 +229,7 @@ class Capture {
     const authorized = () => {
       if (this.wanted()) return true;
       // Preemption or a departed viewer can stop an epoch independently of a later fence.
-      const stop = this.lastViewerFence ?? (!this.closing && !this.ended && this.subscribers.size &&
-        !this.hub.recording(this.job.machineId) && source.recordingQueued?.() !== true ? source.leaseFence?.() : undefined);
+      const stop = this.lastViewerFence ?? (!this.closing && !this.ended && this.subscribers.size ? source.leaseFence?.() : undefined);
       if (stop) throw new CaptureFenced(stop);
       return false;
     };
@@ -256,8 +240,7 @@ class Capture {
     }
     this.attach(feed);
     let pipe: NativePipe | undefined;
-    // A viewer can leave, or a recording can take the device, while the source is still being
-    // opened. A refusal after which provably nothing native runs is clean at once; any other
+    // A viewer can leave while the source is still being opened. A refusal after which provably nothing native runs is clean at once; any other
     // failure to open stays unproven.
     try { pipe = await source.openSource(options, authorized); }
     catch (error) {
@@ -282,16 +265,14 @@ class Capture {
     await Promise.resolve();
     let short = 0;
     while (!this.closing) {
-      const recording = this.hub.recording(this.job.machineId);
       if (this.ended || !this.source) { await this.wait(); continue; }
-      // During a recording the device's one native capture is the recording's: follow its stream.
-      if (recording) { if (this.feed !== recording) this.attach(recording); await this.wait(); continue; }
       if (!this.wanted()) { await this.wait(); continue; }
       const started = performance.now(), brief = Math.min(SHORT_EPOCH_MS, (this.hub.options.epochSeconds ?? LIVE_EPOCH_SECONDS) * 500);
-      let release!: () => void;
-      this.running = new Promise<void>(resolve => { release = resolve; });
+      this.running = true;
       let outcome: Awaited<ReturnType<Capture['runEpoch']>>;
-      try { outcome = await this.runEpoch(this.source); } finally { this.running = undefined; release(); }
+      try { outcome = await this.runEpoch(this.source); }
+      catch (error) { this.unknown = this.nativeStarted; throw error; }
+      finally { this.running = false; }
       if (outcome.fence) { this.fence = outcome.fence; this.unknown = !outcome.cleaned; this.halted = true; }
       else if (!outcome.cleaned) { this.unknown = true; await this.fail(); }
       // An epoch that stopped while its viewers still held authority failed; it is not retried.
@@ -312,10 +293,10 @@ class Capture {
 
 export class LiveCaptureHub {
   private readonly captures = new Map<string, Capture>();
-  private readonly recordings = new Map<string, Feed>();
+  private readonly recordings = new Set<string>();
   private closed = false;
   constructor(readonly options: LiveHubOptions) {}
-  recording(machineId: string): Feed | undefined { return this.recordings.get(machineId); }
+
   journal(job: LiveCaptureJob, state: Record<string, unknown>): void { this.options.save(job.id, { generation: job.generation, machineId: job.machineId, ...state }); }
   forget(capture: Capture): void { if (this.captures.get(capture.job.machineId) === capture) this.captures.delete(capture.job.machineId); }
   /** True while this process holds the capture; its saved journal then describes live work. */
@@ -324,9 +305,10 @@ export class LiveCaptureHub {
   /** Joins the device's capture or journals a new one. `source` is undefined when this host
    * cannot capture: the viewer is told so and the capture is reported clean without running. */
   acquire(job: LiveCaptureJob, source: LiveCaptureSource | undefined): LiveCaptureHandle {
-    const journaled = () => { try { return this.options.load(job.id) !== undefined; } catch { return false; } };
+    const journaled = () => { try { return this.options.load(job.id, job.machineId, job.generation) !== undefined; } catch { return false; } };
     // A stopping runner takes no new capture, and never attaches for one it has not journaled.
     if (this.closed) throw new LiveCaptureRefused('This runner is stopping.', false);
+    if (this.recordings.has(job.machineId)) throw captureConflict('record');
     let capture = this.captures.get(job.machineId);
     if (capture) {
       if (capture.job.id !== job.id || capture.job.generation !== job.generation || capture.closing) throw new LiveCaptureRefused('The device\'s live capture is ending.', journaled());
@@ -341,36 +323,14 @@ export class LiveCaptureHub {
     let released = false;
     return { subscribe: live => held.subscribe(live), release: () => { if (!released) { released = true; held.release(); } } };
   }
-  /** Called by a recording before it opens its native source. It never refuses and never changes
-   * what the recording receives. The device's live epoch, if one runs, is stopped; the recording
-   * waits a bounded time for proof before starting. The returned tap feeds the recording's stream
-   * to viewers. */
-  async beginRecording(machineId: string): Promise<RecordingTap> {
-    const began = performance.now(), capture = this.captures.get(machineId);
-    // The controller admits one recording per device; a second would simply not be fed to viewers.
-    const feed = this.recordings.has(machineId) ? undefined : new Feed();
-    if (feed) this.recordings.set(machineId, feed);
-    let proven = true;
-    if (capture) {
-      capture.poke();
-      proven = await within(capture.settled().then(() => !capture.unknown), this.options.handoverMs ?? LIVE_HANDOVER_SECONDS * 1000, false);
-    }
-    let ended = false;
-    return {
-      waitedMs: performance.now() - began, proven,
-      // A stream the segmenter refuses ends the tee for the viewers, never the recording.
-      push: data => { if (!ended && feed) try { feed.push(data); } catch { /* viewers simply receive no more of this stream */ } },
-      end: cleaned => {
-        if (ended) return; ended = true;
-        if (!feed) return;
-        if (this.recordings.get(machineId) === feed) this.recordings.delete(machineId);
-        const current = this.captures.get(machineId);
-        current?.detach(feed);
-        // A recording whose stop is unproven leaves the device without a provable capture state.
-        if (!cleaned) current?.finish('capture_unavailable');
-        current?.poke();
-      },
-    };
+  /** Reserve synchronously before a native source can open. Live-view acquisition uses the
+   * same per-device state, including captures that are still proving their cleanup. */
+  reserveRecording(machineId: string): () => void {
+    if (this.closed) throw new ServiceError('This runner is stopping.', 410);
+    if (this.captures.has(machineId)) throw captureConflict('live');
+    if (this.recordings.has(machineId)) throw captureConflict('record');
+    this.recordings.add(machineId);
+    return () => { this.recordings.delete(machineId); };
   }
   /** Stops every capture and waits for its cleanup proof. Immediate when nothing is captured. */
   async close(): Promise<void> {

@@ -35,11 +35,16 @@ function fixture(t: TestContext, devices = 1) {
     principal: () => token === options.adminToken ? { kind: "operator", user: null, scopes: ["admin"] } : principalHash(undefined, tokenHash(token)) });
   const ids = Array.from({ length: devices }, () => String(machines.create({ id: randomUUID(), name: "phone", templateId: phone.id, resources: {} }, req("POST", "/v1/machines")).id));
   const states = new Map(ids.map(id => [id, "running"]));
-  const heartbeat = () => object(machines.heartbeat(host, hostToken, { offer, reports: Object.fromEntries([...states].map(([id, state]) => [id, { state }])) }));
+  const heartbeat = (captureJournalsReady?: boolean) => object(machines.heartbeat(host, hostToken, {
+    offer, reports: Object.fromEntries([...states].map(([id, state]) => [id, { state }])),
+    ...(captureJournalsReady === undefined ? {} : { health: { status: "passed", checkedAt: now, capabilities: { captureJournalsReady } } }),
+  }));
   heartbeat();
   const call = (method: string, path: string, body: Record<string, unknown> = {}, token = ownerToken) => { const response = views.handle(req(method, path, body, token)); assert.ok(response); return object(response.body) as unknown as View; };
   const base = (machine = ids[0]!) => `/v1/machines/${machine}/live-views`;
   return { ids, host, hostToken, ownerToken, secondToken, adminToken, operator: options.adminToken, heartbeat, call, req, base,
+    report: (machine: string, state: string) => { states.set(machine, state); heartbeat(); },
+    clearOwner: (machine: string) => store.transaction(db => db.prepare("UPDATE machines SET owner=NULL WHERE id=?").run(machine)),
     get machines() { return machines; }, get video() { return video; },
     create: (body: Record<string, unknown> = {}, token = ownerToken, machine = ids[0]!) => call("POST", base(machine), { id: randomUUID(), ...body }, token),
     read: (view: View, token = ownerToken) => call("GET", `${base(view.machineId)}/${view.id}`, {}, token),
@@ -85,6 +90,14 @@ test("a view's lifetime runs from readiness, only a ready view renews, and an un
   f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${view.captureId}/finish`, { generation, cleaned: true }, f.hostToken));
   assert.deepEqual([f.capture(view).state, f.capture(view).cleaned], ["finished", true]);
   assert.deepEqual(f.reserved(), before);
+});
+
+test("account administrators and the operator cannot admit a live view of an operator-created machine", t => {
+  const f = fixture(t), request = f.req("POST", "/v1/machines", {}, f.operator);
+  const machine = String(f.machines.create({ id: randomUUID(), name: "unowned", templateId: phone.id, resources: {} }, request).id);
+  f.report(machine, "running");
+  for (const token of [f.adminToken, f.operator]) assert.throws(() => f.create({}, token, machine), refused(404));
+  assert.equal(f.reserved().cpu, 2, "the unowned device holds no capture reservation");
 });
 
 test("a view that never attaches times out, and a capture whose host never attached frees its reservation at once", t => {
@@ -166,37 +179,44 @@ test("views are bounded per device and per credential, and a create-and-close lo
   assert.equal(open(f.ids[2]!, f.secondToken).state, "pending");
 });
 
-test("a recording in progress does not refuse a live view, a running live capture does not refuse a recording, and an unclean ended session refuses both", t => {
-  const f = fixture(t, 2), machine = f.ids[0]!, before = f.reserved();
-  const record = (target = machine) => object(f.video.handle(f.req("POST", `/v1/machines/${target}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 30, bitRate: 4_000_000 }))!.body) as { id: string; generation: string; state: string };
-  // A view beside a recording shares the device's capture reservation.
-  const recording = record(), view = f.create();
+test("an unversioned runner gets exclusive admissions in pending, attached and ready phases", t => {
+  const f = fixture(t), machine = f.ids[0]!, path = `/v1/machines/${machine}/video-sessions`;
+  const before = f.reserved();
+  const record = () => object(f.video.handle(f.req("POST", path, { id: randomUUID(), fps: 30, durationSeconds: 30, bitRate: 4_000_000 }))!.body);
+  const recording = record();
+  const attach = { type: "video-sessions.attach", sessionId: String(recording.id), generation: String(recording.generation) } as const;
+  assert.throws(() => f.create(), refused(409, "device_recording_active"));
+  f.heartbeat(false);
+  assert.throws(() => f.create(), { code: "capture_journal_uncertain", retryable: false });
+  f.heartbeat(true);
+  f.video.command({ ...attach, side: "host", ownerId: f.host, token: f.hostToken });
+  assert.throws(() => f.create(), refused(409, "device_recording_active"));
+  f.video.command({ ...attach, side: "consumer", ownerId: machine, token: f.ownerToken });
+  assert.throws(() => f.create(), refused(409, "device_recording_active"));
+  f.video.handle(f.req("POST", `${path}/${recording.id}/close`, {}));
+  assert.throws(() => f.create(), refused(409, "device_recording_active"));
   assert.deepEqual(f.reserved(), { ...before, cpu: before.cpu + 1, memoryMiB: before.memoryMiB + 256 });
-  assert.throws(() => record(), refused(409), "still one recording per device");
-  // The recording's host attaches and the recording is then closed without cleanup proof.
-  f.video.command({ type: "video-sessions.attach", sessionId: recording.id, generation: recording.generation, side: "host", ownerId: f.host, token: f.hostToken });
-  f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions/${recording.id}/close`, {}));
-  // The running live capture still takes viewers, but once it ends no new capture may start.
-  assert.equal(f.create().captureId, view.captureId);
-  for (const row of [view]) f.close(row);
-  f.advance(31); f.heartbeat();
-  assert.throws(() => f.create(), refused(409, "capture_cleanup_pending"));
-  assert.throws(() => record(), refused(409));
-  // Its positive receipt clears the device.
+  f.advance(91);
+  f.video.handle(f.req("POST", `${path}/${recording.id}/abandon`, { reason: "Recorder stop remains unproven." }, f.adminToken));
+  f.heartbeat();
+  assert.throws(() => f.create(), refused(409, "device_recording_active"));
+  assert.equal(f.reserved().cpu, before.cpu + 1);
   f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${recording.id}/finish`, { generation: recording.generation, cleaned: true }, f.hostToken));
-  const again = f.create();
-  // A running live capture does not refuse a recording of the same device.
-  assert.equal(record().state, "pending");
-  // The broker of recordings never serves a live capture, and a live capture has no peers of its own.
-  const capture = f.capture(again);
-  assert.throws(() => f.video.command({ type: "video-sessions.attach", sessionId: again.captureId, generation: String(capture.generation), side: "host", ownerId: f.host, token: f.hostToken }), refused(409));
-  assert.deepEqual(f.video.command({ type: "video-sessions.authorized", sessionId: again.captureId, generation: String(capture.generation) }), { authorized: false });
-  // Closing the capture as a video session ends its views.
-  f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions/${again.captureId}/close`, {}));
-  assert.deepEqual([f.read(again).state, f.read(again).endReason], ["ended", "capture_ended"]);
+  const view = f.create(), capture = f.capture(view);
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
+  f.attach(view, "host");
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
+  f.attach(view, "consumer");
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
+  // Live captures have no recording broker peers of their own.
+  const identity = { sessionId: view.captureId, generation: String(capture.generation) };
+  assert.throws(() => f.video.command({ type: "video-sessions.attach", ...identity, side: "host", ownerId: f.host, token: f.hostToken }), refused(409));
+  assert.deepEqual(f.video.command({ type: "video-sessions.authorized", ...identity }), { authorized: false });
+  f.video.handle(f.req("POST", `${path}/${view.captureId}/close`, {}));
+  assert.deepEqual([f.read(view).state, f.read(view).endReason], ["ended", "capture_ended"]);
 });
 
-test("beside a live capture that ended without cleanup proof, a view and a recording are told alike whether waiting helps", t => {
+test("beside a live capture that ended without cleanup proof, both paths remain blocked through abandonment", t => {
   const f = fixture(t), machine = f.ids[0]!;
   const record = () => object(f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 30, bitRate: 4_000_000 }))!.body) as { state: string };
   const told = (code: string, retryable: boolean) => (error: unknown) => error instanceof ServiceError && error.status === 409 && error.code === code && error.retryable === retryable;
@@ -205,16 +225,16 @@ test("beside a live capture that ended without cleanup proof, a view and a recor
   // The runner has a minute from the capture's end to report that it stopped: waiting may help.
   f.advance(50);
   assert.throws(() => f.create(), told("capture_cleanup_pending", true));
-  assert.throws(() => record(), told("capture_cleanup_pending", true), "a recording gets the same stable code, not a bare conflict");
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
   // After that minute nothing a caller can wait for clears the device.
   f.advance(11);
   assert.throws(() => f.create(), told("capture_cleanup_unproven", false));
-  assert.throws(() => record(), told("capture_cleanup_unproven", false));
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
   // Abandonment claims no cleanup, so it changes neither answer.
   f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions/${view.captureId}/abandon`, { reason: "The runner never reported this capture's stop." }, f.adminToken));
   assert.equal(object(f.capture(view).resolution).decision, "abandoned");
   assert.throws(() => f.create(), told("capture_cleanup_unproven", false));
-  assert.throws(() => record(), told("capture_cleanup_unproven", false));
+  assert.throws(() => record(), refused(409, "device_live_view_active"));
   // Only positive proof does, however late it arrives.
   f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${view.captureId}/finish`, { generation: String(f.capture(view).generation), cleaned: true }, f.hostToken));
   assert.equal(record().state, "pending");
@@ -233,4 +253,13 @@ test("a controller restart ends every view, and runners are told of views and he
   assert.deepEqual([f.capture(view).state, f.capture(view).cleaned], ["disconnected", false], "an attached capture still awaits its cleanup proof");
   assert.deepEqual(f.heartbeat().liveViews, []);
   assert.deepEqual((f.heartbeat().liveCaptures as { id: string }[]).map(c => c.id), [view.captureId]);
+});
+
+test("a ready administrator view loses stream authority when its machine has no owner", t => {
+  const f = fixture(t), view = f.create({}, f.adminToken);
+  f.attach(view, "consumer", f.adminToken); f.attach(view, "host");
+  assert.equal(f.authorized(view), true);
+  f.clearOwner(view.machineId);
+  assert.equal(f.authorized(view), false);
+  assert.equal(f.read(view, f.adminToken).endReason, "access_revoked");
 });

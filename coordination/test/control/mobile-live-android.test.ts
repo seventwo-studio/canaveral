@@ -19,9 +19,9 @@ import { collect, ordered, stoppedWithin } from "./live-fixture.ts";
 const LEASE = { cpu: 2, memoryMiB: 2048, diskGiB: 8 };
 type Viewer = { id: string; stream: LiveStream; got: ReturnType<typeof collect> };
 const media = (viewer: Viewer) => viewer.got.segments.filter(s => s.kind === "media");
-const journal = (h: Harness, capture: string) => JSON.parse(readFileSync(join(h.root, "runner", "work", "live", `${capture}.json`), "utf8")) as { state: string; cleaned?: boolean; hostCleaned?: boolean };
+const journal = (h: Harness, machine: string, capture: string) => JSON.parse(readFileSync(join(h.root, "runner", "work", "live", `${machine}.${capture}.json`), "utf8")) as { state: string; cleaned?: boolean; hostCleaned?: boolean; deviceStopped?: boolean };
 
-test("a view closed while its capture is being opened, before its second or third segment, or while the next run opens leaves the capture proven clean", { skip, timeout: 240000 }, async t => {
+test("a view closed during preflight, recorder spawn, streaming or rollover leaves the capture proven clean", { skip, timeout: 240000 }, async t => {
   // Three-second capture runs, so a rollover is reached quickly (natively a run lasts 180 seconds).
   const options: HarnessOptions = { extra: { cpu: 1, memoryMiB: 256 }, encoder: "fragments", liveEpochSeconds: 3 };
   const h = await harness(t, 1, options), app = await h.application();
@@ -29,43 +29,66 @@ test("a view closed while its capture is being opened, before its second or thir
   const lease = new LeaseClient({ baseUrl: h.url, leaseId: a.id, leaseKey: a.key, allowLoopbackHttp: true });
   const watch = async (): Promise<Viewer> => { const id = randomUUID(), stream = await lease.live.watch({ id, member: "primary" }, { timeoutMs: 20000 }); return { id, stream, got: collect(stream) }; };
   const recorders = () => h.media.started.get(name) ?? [];
-  // From here every adb answer takes 150 ms. Opening a run is several adb round trips before the
-  // recorder is spawned and one more for its identity, so a viewer can leave at each point of it.
-  options.adbDelayMs = 150;
-  const leave = async (viewer: Viewer, label: string): Promise<void> => {
+  const provider = h.provider(), openVideo = provider.openVideo.bind(provider);
+  let preflight: (() => Promise<void>) | undefined;
+  let skipPreflight = false;
+  let authorized: Parameters<typeof openVideo>[4];
+  t.mock.method(provider, "openVideo", (...[machine, image, folder, video, check, cleanupCheck]: Parameters<typeof openVideo>) => {
+    authorized = check;
+    const pause = skipPreflight ? undefined : preflight;
+    if (!skipPreflight) preflight = undefined;
+    skipPreflight = false;
+    let firstCheck = true;
+    return openVideo(machine, image, folder, video, async () => {
+      if (firstCheck) { firstCheck = false; await pause?.(); }
+      return check();
+    }, cleanupCheck);
+  });
+  const leave = async (viewer: Viewer, label: string, resume?: () => void): Promise<void> => {
     const capture = viewer.stream.view.captureId, segments = media(viewer).length, left = Date.now();
     viewer.stream.close(); await viewer.got.done;
+    if (resume) {
+      try { await until(async () => !await authorized(), "the runner to observe the viewer's departure"); }
+      finally { resume(); }
+    }
     // Positive cleanup, reported by the runner itself: nothing was left for an administrator.
     await until(async () => (await lease.video.inspect(capture)).cleaned === true, `positive cleanup of a capture left ${label}`, 20000);
     t.diagnostic(`left ${label}: ${segments} segment(s) received, clean ${Date.now() - left} ms later, ${recorders().length} recorder(s) started so far`);
-    assert.deepEqual([journal(h, capture).state, journal(h, capture).cleaned], ["finished", true], label);
+    assert.deepEqual([journal(h, a.machineId, capture).state, journal(h, a.machineId, capture).cleaned], ["finished", true], label);
     assert.equal(recorders().some(recorder => recorder.running), false, `no recorder runs after a capture left ${label}`);
     assert.equal(h.media.encodersOpen, 0);
     assert.deepEqual(await h.reserved(), LEASE, `the capture's reservation is released after it was left ${label}`);
     assert.ok(!viewer.got.segments.length || ordered(viewer.got.segments));
   };
-  // While the first run is being opened: at once, during the preflight, around the recorder's spawn.
-  for (const afterMs of [0, 200, 450, 700]) {
-    const viewer = await watch();
-    await sleep(afterMs);
-    if (!afterMs) assert.equal(media(viewer).length, 0, "left before any segment");
-    await leave(viewer, `${afterMs} ms into the opening of its first run`);
+  // Hold the provider at its first authorization check or just after the fixture recorder spawns.
+  for (const stage of ["preflight", "spawn", "rollover"] as const) {
+    const gate = Promise.withResolvers<void>();
+    let reached = false;
+    const pause = async () => { reached = true; await gate.promise; };
+    const before = recorders().length, expectedStarts = before + (stage === "preflight" ? 0 : 1);
+    skipPreflight = stage === "rollover";
+    if (stage === "spawn") options.afterRecorderSpawn = pause;
+    else preflight = pause;
+    try {
+      const viewer = await watch();
+      await until(() => reached, `${stage} fixture gate`);
+      assert.equal(recorders().length, expectedStarts);
+      assert.equal(recorders().slice(before).some(recorder => recorder.running), stage === "spawn");
+      if (stage !== "rollover") assert.equal(media(viewer).length, 0);
+      else assert.ok(media(viewer).length > 0, "the first epoch streamed before rollover");
+      await leave(viewer, stage, gate.resolve);
+      assert.equal(recorders().length, expectedStarts);
+    } finally {
+      gate.resolve();
+      delete options.afterRecorderSpawn;
+    }
   }
-  // Before its second and before its third segment.
   for (const received of [1, 2]) {
     const viewer = await watch();
     await until(() => media(viewer).length >= received, `${received} segment(s)`);
-    await leave(viewer, `after ${received} segment(s)`);
+    await leave(viewer, `after receiving ${received} segment(s)`);
   }
-  // During a rollover: the run ended by itself at its time limit and the next one is being opened.
-  for (const afterMs of [0, 300]) {
-    const viewer = await watch(), before = recorders().length;
-    await until(() => recorders().length === before + 1 && recorders().at(-1)!.running === false && media(viewer).length > 0, "a run that ended at its time limit", 20000);
-    await sleep(afterMs);
-    await leave(viewer, `${afterMs} ms into the opening of its next run`);
-  }
-  // The device was never locked: it is watched again, and that capture ends clean too.
-  options.adbDelayMs = 0;
+  // A later view still opens and cleans up normally.
   const again = await watch();
   await until(() => media(again).length >= 3, "segments of a later view");
   await leave(again, "while it was streaming");
@@ -74,12 +97,15 @@ test("a view closed while its capture is being opened, before its second or thir
 test("the live capture of an owned Android device that its runner cannot prove stopped settles only when the provider reports the emulator process gone", { skip, timeout: 240000 }, async t => {
   const options: HarnessOptions = { extra: { cpu: 1, memoryMiB: 256 }, encoder: "fragments" };
   const h = await harness(t, 1, options), machine = randomUUID();
+  const account = await h.api("POST", "/v1/auth/setup", { username: "admin", password: "correct-horse-battery-staple-fixture" });
+  assert.equal(account.status, 200);
+  const owner = account.body.token as string;
   // An account-owned device, booted by the runner itself as in production.
-  await until(async () => (await h.api("POST", "/v1/machines", { id: machine, name: "watched", templateId: h.image.id, templateRevision: "1", arch })).status === 200, "placement of an account-owned device");
+  await until(async () => (await h.api("POST", "/v1/machines", { id: machine, name: "watched", templateId: h.image.id, templateRevision: "1", arch }, owner)).status === 200, "placement of an account-owned device");
   const observed = async () => (await h.api("GET", `/v1/machines/${machine}`)).body.observed as string;
   await until(async () => await observed() === "running", "a booted account-owned device", 40000);
   const base = await h.reserved() as { cpu: number; memoryMiB: number };
-  const live = new MachineLiveClient({ baseUrl: h.url, credential: h.admin, allowLoopbackHttp: true });
+  const live = new MachineLiveClient({ baseUrl: h.url, credential: owner, allowLoopbackHttp: true });
   const watch = async (): Promise<Viewer> => { const id = randomUUID(), stream = await live.watch(machine, { id }, { timeoutMs: 20000 }); return { id, stream, got: collect(stream) }; };
   const viewer = await watch();
   await until(() => media(viewer).length >= 3, "live segments of an owned device");
@@ -112,7 +138,8 @@ test("the live capture of an owned Android device that its runner cannot prove s
   // The runner reported only its own encoder's exit; the device's observed stop completes the proof.
   await until(async () => (await session()).cleaned === true, "cleanup settled by the device's observed stop");
   assert.equal((await session()).hostCleaned, true);
-  assert.deepEqual([journal(h, capture).state, journal(h, capture).cleaned, journal(h, capture).hostCleaned], ["unknown", false, true]);
+  await until(() => journal(h, machine, capture).deviceStopped === true, "the runner to retain the proven emulator stop");
+  assert.deepEqual([journal(h, machine, capture).state, journal(h, machine, capture).cleaned, journal(h, machine, capture).hostCleaned], ["unknown", false, true]);
   await until(() => recorder.running === false, "the recorder to end with its emulator");
   assert.equal(h.media.encodersOpen, 0);
   await until(async () => { const reserved = await h.reserved(); return reserved.cpu === base.cpu - 2 && reserved.memoryMiB === base.memoryMiB - 2048; }, "neither the stopped device nor its capture reserved");
@@ -126,5 +153,5 @@ test("the live capture of an owned Android device that its runner cannot prove s
   assert.notEqual(next, capture);
   again.stream.close(); await again.got.done;
   await until(async () => (await h.api("GET", `/v1/machines/${machine}/video-sessions/${next}`)).body.cleaned === true, "the runner's own recorder proof");
-  assert.deepEqual([journal(h, next).state, journal(h, next).cleaned], ["finished", true]);
+  assert.deepEqual([journal(h, machine, next).state, journal(h, machine, next).cleaned], ["finished", true]);
 });

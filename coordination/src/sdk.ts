@@ -15,6 +15,7 @@ import { TerminalClient } from './terminal-sdk.ts';
 import { DisplayClient } from './visual-sdk.ts';
 import type { DisplayOptions } from './visual-sdk.ts';
 import { receiveSnapshot, MAX_SNAPSHOT_BYTES } from './accessibility-sdk.ts';
+import { captureConflict, captureJournalRefusal } from './mobile-live.ts';
 import { LeaseLiveClient, LeaseVideoClient } from './video-sdk.ts';
 import { LeaseTunnelClient } from './tunnel-sdk.ts';
 import { uploadAppArtifactFile } from './app-artifact-client.ts';
@@ -65,6 +66,9 @@ export function interrupted(error: unknown, requestId: string): ConsumerError {
     error instanceof ConsumerError ? error.code : 'session_incomplete', requestId);
 }
 const WORKER_MESSAGES: Record<string, string> = {
+  capture_journal_uncertain: captureJournalRefusal().message,
+  device_live_view_active: captureConflict('live').message,
+  device_recording_active: captureConflict('record').message,
   capability_unsupported: 'This worker does not support the requested capability. Inspect the session before selecting another environment.',
   session_incomplete: 'Access ended without confirmed completion. Inspect before retrying.',
   upload_publication_uncertain: 'Upload publication may have occurred. Inspect the destination before retrying.',

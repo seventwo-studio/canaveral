@@ -13,6 +13,7 @@ import { object, ServiceError } from "./errors.ts";
 import { modelJobCanRelease, modelReceiptMatches, parseModelJob } from "./model-job.ts";
 import type { GenerationResult, ModelJob, ModelJobState } from "./model-job.ts";
 import { SqliteStore } from "./sqlite.ts";
+import { strictJson } from "./strict-json.ts";
 
 type Signal = "continue" | "cancel" | "fence";
 type Json = Record<string, unknown>;
@@ -89,47 +90,6 @@ function settings(config: Json): Settings {
     startupMs: bounded(config, "startupMs", 20_000, 20_000), executionMs: bounded(config, "executionMs", 120_000, 120_000),
     stopMs: bounded(config, "stopMs", 5_000, 10_000), responseBytes: bounded(config, "responseBytes", 1_048_576, 1_048_576, 256),
     pollMs: bounded(config, "pollMs", 50, 1000, 10) };
-}
-
-/** JSON.parse alone silently replaces duplicate identity/usage fields. Bound depth and reject them. */
-function strictJson(bytes: Buffer): unknown {
-  const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  let at = 0;
-  const whitespace = (): void => { while (/[\x20\t\r\n]/.test(source[at] ?? "!")) at++; };
-  const string = (): string => {
-    const start = at++;
-    while (at < source.length) {
-      const char = source[at++];
-      if (char === "\\") { at++; continue; }
-      if (char === '"') return JSON.parse(source.slice(start, at)) as string;
-    }
-    throw failed();
-  };
-  const value = (depth: number): void => {
-    if (depth > 64) throw failed();
-    whitespace();
-    if (source[at] === '"') { string(); return; }
-    if (source[at] === "{" || source[at] === "[") {
-      const isObject = source[at++] === "{", end = isObject ? "}" : "]", seen = new Set<string>();
-      whitespace(); if (source[at] === end) { at++; return; }
-      for (;;) {
-        whitespace();
-        if (isObject) {
-          if (source[at] !== '"') throw failed();
-          const key = string(); if (seen.has(key)) throw failed(); seen.add(key);
-          whitespace(); if (source[at++] !== ":") throw failed();
-        }
-        value(depth + 1); whitespace();
-        const separator = source[at++];
-        if (separator === end) return;
-        if (separator !== ",") throw failed();
-      }
-    }
-    const token = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(source.slice(at));
-    if (!token) throw failed(); at += token[0].length;
-  };
-  value(0); whitespace(); if (at !== source.length) throw failed();
-  return JSON.parse(source) as unknown;
 }
 
 /** Private stdio RPC only. Group signals and leader reaping remain entirely in Rust. */

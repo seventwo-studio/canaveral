@@ -379,7 +379,8 @@ Recover in this order:
 4. **Delete** the machine. Abandonment unblocks only this deletion. It still
    blocks another capture on that machine, and the session keeps its 1 CPU and
    256 MiB reservation, and its host slot, until the deletion completes. The
-   operator owns any residue, which the device's deletion removes.
+   operator owns any residue, which the device's deletion removes. A confirmed
+   device stop permits this recovery even if the capture journal is unreadable.
 
 A positive cleanup receipt that arrives after abandonment is still recorded and
 releases the reservation as usual. Sessions left uncleaned on machines deleted
@@ -1311,8 +1312,10 @@ A leased device's screen is visible to its lease holder only. The lease route
 refuses the application key, the operator, account credentials and another lease's
 key with 401, as every lease session does. The machine route refuses a leased
 machine with 409, so no operator or owner view of a leased device exists. On the
-machine route another account receives 404, a token without `machines:access` 403,
-and a view is bound to the credential that created it: another credential of the
+machine route an unowned device returns 404, as does another account’s device for
+a non-administrator. A view ends with `access_revoked` if the machine loses
+its owner. A token without `machines:access` receives 403. A view is bound
+to the credential that created it, so another credential of the
 same owner cannot read or close it. iOS simulator leases do not exist yet; their
 live view arrives with them.
 
@@ -1415,52 +1418,29 @@ renew only while its picture is visible.
   restart. Three epochs in a row that each end by themselves within five seconds
   end the capture as failed.
 
-### A live view beside a recording
+### Live views and recording on the same device
 
-A device never runs two native captures at once; the regime the
-[native trials](#dashboard-capture) covered stays the only one. A live capture and
-a recording of one device therefore coexist as follows.
+A device can be watched live or recorded. A pending or attached live view, or
+an ended live capture with unproven cleanup, blocks recording with 409
+`device_live_view_active`. An admitted, attaching or running recording, or
+an ended recording with unproven cleanup, blocks live views with 409
+`device_recording_active`. Retry after the other session ends and cleanup is
+confirmed. An unproven live capture keeps its slot and reservation.
 
-- The "one per machine" rule keeps its meaning for each kind: one recording, and
-  one live capture. A live capture that is still running does not refuse a
-  recording. Both share one host slot and reservation on the same device. A recording
-  short of host capacity can end the oldest eligible live capture on another device.
-  That capture keeps its reservation until its own cleanup is proven.
-- **A recording takes the device.** Before a recording opens its native source,
-  the runner stops the live epoch and requires the same proof as for a cancelled
-  recording. The recording's start is delayed by that stop, within the bounds in
-  [Android recorder cleanup](#android-recorder-cleanup-after-early-cancellation);
-  the native recording trial proved a cancelled recorder stopped in about five
-  seconds, and the delay for a live epoch has no native measurement. The runner
-  waits at most 15 seconds for the proof, and counts that time separately from
-  the requested recording duration.
-  If the stop cannot be proven, the recording captures nothing and ends with
-  `session_incomplete`; its session is cleaned because it started no capture.
-- **Viewers follow the recording.** While it runs, the runner also feeds the
-  recording's own stream to the device's viewers, as a new epoch. A viewer who joins
-  during a recording joins that stream. The recording receives exactly the bytes it
-  would have received alone, and its digest, receipt and cleanup are unchanged;
-  viewers see the recording's bit rate for its duration. A stream the runner cannot
-  segment ends the copy for the viewers, never the recording.
-- **Afterwards.** When the recording ends with positive cleanup, the live capture
-  starts its own next epoch. When the recording's cleanup is unknown, the device
-  has no provable capture state: the views end with `capture_unavailable`, and the
-  live capture, which ran nothing unproven itself, is reported clean.
-- An ended session of either kind without positive cleanup refuses a new live
-  view of that device, and an ended live capture without it refuses a new
-  recording. Both refusals are a 409 whose code says whether waiting can help:
-  - `capture_cleanup_pending` (retryable) while the runner may still report the
-    stop. That is until the ended session's deadline: a minute after a live capture
-    ended, and for a recording a minute after its requested duration would have
-    run out.
-  - `capture_cleanup_unproven` (not retryable) after that deadline, or once an
-    administrator abandoned the session. Waiting no longer helps. A late receipt
-    from the runner still clears it; otherwise only the device's observed stop (an
-    owned Android live capture whose encoder exit was confirmed), the lease's own
-    cleanup or the machine's deletion does.
+The controller checks and reserves the device in one transaction, and the
+runner independently checks the device before opening a native source. On
+27 November 2026, we chose mutual exclusion because handover repeatedly
+allowed races across mixed controller and runner versions. The mutual-exclusion
+guarantee applies when the controller and runner both run this version. Viewers
+cannot watch a device while it records.
 
-  A recording beside another recording of the device that is running or not proven
-  clean keeps its earlier answer, a plain 409.
+A recording short of host capacity can still end the oldest eligible live
+capture on a different device. That live capture keeps its reservation until
+positive cleanup. For a second live capture of the same device, the
+`capture_cleanup_pending` and `capture_cleanup_unproven` codes still distinguish
+whether waiting for a receipt may help. When positive cleanup stays
+unavailable, an administrator can abandon the session to allow the machine's
+deletion. Abandonment alone never permits another capture on the same device.
 
 ### Endings
 
@@ -1499,13 +1479,13 @@ The controller records why a view ended in `endReason`:
 | `device_stopped` | The device is no longer wanted or observed running, or was deleted |
 | `host_unavailable` | The host is disabled, stale or re-enrolled, or the assignment changed |
 | `capture_ended` | The shared capture ended: closed as a video session, or the runner reported it finished |
-| `preempted_by_recording` | A recording on the same host needed a capture slot or capacity, and this view's capture was the oldest live capture there; see [a live view beside a recording](#a-live-view-beside-a-recording). Open a new view when a slot is free |
+| `preempted_by_recording` | A recording on the same host needed a capture slot or capacity, and this view's capture was the oldest live capture there; see [live views and recording on the same device](#live-views-and-recording-on-the-same-device). Open a new view when a slot is free |
 | `disconnected` | A peer's socket dropped and the controller found no other cause. This includes a write to the viewer that stayed blocked for 30 seconds |
 | `controller_restarted` | The controller restarted; all sessions end |
 
 The host can also end a stream it is still serving, in-band, with `{type:"end"}`
-and one of `capture_failed` (the native capture or encoder failed; it is never
-retried), `capture_unavailable` (a recording of the device ended without provable
+and one of `capture_failed` (the native capture or encoder failed and is never
+retried), `capture_unavailable` (reported by legacy runners after unproven recording
 cleanup) or `capture_ended` (the capture this view belongs to is ending, or was
 attempted before a runner restart; open a new view). A host whose own authority
 ended sends nothing more; the controller records that cause.
@@ -1536,7 +1516,8 @@ A live capture holds its slot and reservation from its first view until proof,
 by the recording path's rules. A wedged encoder never frees capacity.
 
 - **The runner's proof.** The runner journals the capture before its first
-  attachment and again before native dispatch (`work/live/{capture}.json`). When
+  attachment and again before native dispatch
+  (`work/live/{machine}.{capture}.json`). When
   the last viewer leaves, each epoch has either ended by itself or been stopped
   with the exact-recorder proof, and each encoder's exit was confirmed. The runner
   then reports positive cleanup through the recording's finish route. A capture
@@ -1551,6 +1532,27 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `stopped`. The host reports that only after the emulator process has exited, and
   the recorder ran inside that process. This rule applies to live captures only;
   recording cleanup is unchanged.
+- **Journal ownership.** The runner scans `<stateDir>/work/live` and
+  `<stateDir>/work/video` before replay. It accepts a legacy flat journal when
+  its body identifies exactly one device and no other journal claims that
+  capture. Legacy ownership sidecars are ignored. Unreadable journals, invalid
+  or incomplete records, duplicate fields, conflicting copies, and noncanonical
+  extensions such as `.JSON` disable capture on the runner. A journal that
+  disappears or changes outside a runner write also disables capture. With
+  matching controller and runner versions that support this refusal, new
+  recordings and live views across the host receive the non-retryable
+  `capture_journal_uncertain` error once the controller sees the runner's
+  health report. The runner also refuses pending attachments and suppresses
+  cleanup receipts. Its logs list the affected paths and reasons. Independent
+  device stop proofs still apply.
+- **Replay.** Only a `finished` journal with `cleaned: true` can release a
+  reservation by itself. It records the runner's proof that capture never
+  started or that it stopped. A saved `hostCleaned: true` receipt can repeat
+  proof of encoder exit, and still needs separate proof that the recorder
+  stopped. An `attaching` journal found on restart could be an older copy from
+  before native dispatch. It triggers host-wide refusal and keeps the
+  reservation held. A `started` or `unknown` journal without cleanup proof
+  keeps its reservation.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
   a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further
@@ -1559,6 +1561,18 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `POST /v1/machines/{machine}/video-sessions/{captureId}/abandon`, at least a
   minute after the capture ended. For an owned Android device whose encoder exit
   was confirmed, stopping the device settles it instead.
+- **Operator recovery.** Take the runner out of service and verify that the
+  affected recorders and encoders have stopped on the devices and host. Once
+  verified, clear the uncertain capture journals in `<stateDir>/work/live` and
+  `<stateDir>/work/video` and remove
+  `<stateDir>/capture-journal-uncertain.json`. The marker persists the refusal
+  across restarts. A runner that finds the marker or cannot read it refuses
+  capture. Restart the runner. Capture admission resumes only
+  after the restarted runner scans both directories without finding uncertainty.
+  Clearing files and restarting do not release held controller reservations,
+  including requests that had already attached when the refusal took effect.
+  Use the applicable device or lease stop proof, or the abandonment and deletion
+  procedure above, to settle them.
 - **A viewer that leaves early.** A run that is still being opened when its last
   viewer leaves is clean at once if the provider refused before it spawned
   anything, which the provider states explicitly. Once the recorder may have been
@@ -1643,8 +1657,7 @@ The native trial covered one Android lease and one viewer. Open:
   (`trun`, `tfhd`, `trex`). The dashboard's verifier read the same flags from
   natively recorded files. The runner's parser delivered decodable fragments
   from one native Android lease stream.
-- The picture's pause at an epoch rollover, and when a recording takes over and
-  hands back.
+- The picture's pause at an epoch rollover.
 - The first picture on a static Android screen, where the encoder may not finish
   probing its input until the screen changes.
 - Encoder and recorder CPU and memory for a capture that runs for hours.
@@ -1670,13 +1683,13 @@ The native trial covered one Android lease and one viewer. Open:
   renewal, expiry of an unrenewed view and close; the stream ending at lease
   expiry, key rotation, release and supervisor loss, each within the bound in
   [endings](#endings) and with its reservation released only on proof; a wedged
-  encoder held until abandonment, refusing a view and a recording alike; a
-  recording before and during a view with never more than one recorder on the
+  encoder held until abandonment, refusing both views and recordings;
+  mutual exclusion with at most one recorder on the
   device; epoch rollover; and the application's resource limits.
 - [mobile-live-android.test.ts](../coordination/test/control/mobile-live-android.test.ts)
   uses the same harness for the points where the real Android provider decides a
   capture's cleanup. A viewer leaves while the first run is being opened (during
-  the preflight and around the recorder's spawn, with a slowed stand-in adb),
+  the preflight and around the recorder’s spawn, using fixture gates),
   before its second and third segment, and while the next run opens after a
   rollover; each time the runner reports positive cleanup and the device can be
   watched again. An account-owned device is stopped while watched, with a guest
@@ -1692,13 +1705,13 @@ The native trial covered one Android lease and one viewer. Open:
   token revocation; one of two viewers losing its authority, or being closed,
   while the other keeps the same run without a gap; a runner that stops while one
   device is watched and a view of another arrives; an unprovable iOS stop; the iOS
-  opt-in; a recording beside a view; and the gateway relay with in-band renewal.
+  opt-in; refusal to record beside a view; and the gateway relay with in-band renewal.
 - [mobile-live-views.test.ts](../coordination/test/control/mobile-live-views.test.ts)
   runs the controller module on real SQLite with an injected clock: the lifetime
   from readiness, renewal and expiry, the attach timeout, retention of an ended
   view, a draining host, the three-second window for a dropped socket's cause, the
-  viewer and row limits, recordings beside live captures, the two refusal codes
-  beside an unproven capture for a view and a recording, and a controller restart.
+  viewer and row limits, mutual exclusion through unproven cleanup and abandonment,
+  and a controller restart.
 - [mobile-live.test.ts](../coordination/test/control/mobile-live.test.ts) covers
   the segmenter, key frame detection, the wire contract against the packaged
   schema and OpenAPI document, and the runner hub in isolation, including the

@@ -436,7 +436,10 @@ its key or its device within about a second. Its capture holds a recording's
 reservation against the host and the application until the recording path's
 cleanup proof. Renewing a view never renews the lease. The application key, the
 operator and another lease's key are refused, and no administrative route shows a
-leased device's screen. An administrator can read the capture's metadata and close
+leased device's screen. Live views and recordings of one leased device exclude
+each other through positive cleanup. Close the view or wait for the recording
+to end, then retry once cleanup is confirmed. An administrator can read the
+capture’s metadata and close
 or abandon it as a video session of the machine, as for a lease recording; that
 route carries no stream. The contract, the asserted bounds and its open native
 questions are in [live screen](mobile-control.md#live-screen). Apart from the one

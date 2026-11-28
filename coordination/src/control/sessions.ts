@@ -562,14 +562,14 @@ export function createSessionUpgradeHandler(client: SessionCommandClient, option
         // peer owns startup; socket writes complete before ready is emitted.
         (peer as SocketPeer & { accepted?: boolean }).accepted = true;
         if (Object.values(pair.peers).length === 2 && Object.values(pair.peers).every(p => (p as SocketPeer & { accepted?: boolean }).accepted)) {
-          if (!await authorized(pair, true)) throw new ServiceError("Session authorization ended.", 410);
+          if (!await authorized(pair, true) || pair.closed || Object.values(pair.peers).some(p => p.socket.destroyed || p.socket.readableEnded)) throw new ServiceError("Session authorization ended.", 410);
           if (pair.gate) { pair.gate.ready = true; pair.gate.checked = performance.now(); pair.gate.used = unusedBudget(); }
           const ready = Buffer.from(JSON.stringify({ type: "ready", sessionId: view.id, generation: view.generation, capability: view.capability }));
           await Promise.all(Object.values(pair.peers).map(p => p.send(ready))); pair.start();
         }
         await pair.started;
         while (!pair.closed) {
-          const message = await peer.message(); if (!message) break;
+          const message = await peer.message(); if (!message || pair.closed) break;
           const relayed = validateRelayMessage(view.capability, command.side, message.data, message.binary);
           // The video consumer may only acknowledge a relayed finish. An early message would sit
           // unread in the capturing runner and is never a valid completion proof.
@@ -636,7 +636,7 @@ export class SessionConnection implements SessionChannel {
     void this.pending.catch(() => {});
     return this.pending;
   }
-  private allowed(): boolean { try { return this.authorized() === true && !this.peer.socket.destroyed; } catch { return false; } }
+  private allowed(): boolean { try { return this.authorized() === true && !this.peer.socket.destroyed && !this.peer.socket.readableEnded; } catch { return false; } }
   /** False once the controller ends the pair (for example on revocation) or authority lapses. */
   get open(): boolean { return !this.failure && this.allowed(); }
   private check(): void { if (this.failure) throw this.failure; if (!this.allowed()) throw new ServiceError("Session authorization or connection ended.", 410, { code: "session_disconnected", retryable: false }); }
