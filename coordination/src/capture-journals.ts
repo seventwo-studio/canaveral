@@ -1,96 +1,175 @@
-import { readdirSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { identifier } from './consumers.ts';
+import { captureJournalRefusal } from './mobile-live.ts';
 import { noLinks, present, readRecord, saveRecord, unknownOutcome } from './runtime-process.ts';
 
 type Kind = 'live' | 'video';
 type Saved = Record<string, unknown>;
+type Journal = { kind: Kind; id: string; path: string; machineId: string; generation: string };
+const kinds = ['live', 'video'] as const;
+const uuid = (value: unknown): string => {
+  if (identifier(value) !== value) throw new Error('Expected a canonical UUID.');
+  return value as string;
+};
+
+function validate(kind: Kind, saved: Saved): void {
+  const { state, cleaned, hostCleaned, deviceStopped, ackReceived, legacyReceipt, stop } = saved;
+  const unfinished = state === 'attaching' || state === 'started';
+  const finished = state === 'finished' && cleaned === true;
+  const unknown = state === 'unknown' && cleaned === false;
+  if (unfinished ? cleaned !== undefined : !finished && !unknown) throw new Error('Invalid capture state or cleanup marker.');
+  if ([hostCleaned, deviceStopped, ackReceived, legacyReceipt].some(value => value !== undefined && value !== true) ||
+      (unfinished && [hostCleaned, deviceStopped, ackReceived, legacyReceipt, stop].some(value => value !== undefined)) ||
+      (ackReceived && (kind !== 'video' || !finished)) ||
+      (deviceStopped && (kind !== 'live' || hostCleaned !== true))) throw new Error('Invalid capture cleanup evidence.');
+  if (stop !== undefined) {
+    if (kind !== 'live' || stop === null || typeof stop !== 'object' ||
+        Object.keys(stop).sort().join(',') !== 'cause,leaseId,leaseRevision') throw new Error('Invalid capture stop evidence.');
+    const { cause, leaseId, leaseRevision } = stop as Saved;
+    uuid(leaseId);
+    if (cause !== 'fence' || !Number.isSafeInteger(leaseRevision) || Number(leaseRevision) < 1) throw new Error('Invalid capture stop evidence.');
+  }
+}
 
 export class CaptureJournals {
-  private readonly restored = new Map<Kind, { legacy: Map<string, string[]>; uncertain: boolean }>();
+  private readonly entries = new Map<string, Journal>();
+  private readonly stamps = new Map<string, string>();
+  private readonly problems = new Map<string, string>();
 
-  constructor(private readonly state: string) {}
+  constructor(private readonly state: string, private readonly log: (message: string) => void) {}
 
-  initialize(): void {
-    this.restore('live');
-    this.restore('video');
+  get blocked(): boolean { return this.problems.size !== 0; }
+  get issues(): ReadonlyMap<string, string> { return this.problems; }
+
+  requireReady(): void {
+    if (this.blocked) throw captureJournalRefusal();
   }
 
-  private directory(kind: Kind): string {
-    return join(this.state, 'work', kind);
+  private fault(path: string, reason: string): void {
+    if (this.problems.has(path)) return;
+    this.problems.set(path, reason);
+    this.log(`Capture journal refusal at ${JSON.stringify(path)}: ${reason}`);
   }
 
-  private names(kind: Kind): string[] {
-    const directory = this.directory(kind);
-    noLinks(directory);
-    return present(directory) ? readdirSync(directory).filter(name => name.endsWith('.json')) : [];
+  private directory(kind: Kind): string { return join(this.state, 'work', kind); }
+
+  /** Inspect both directories before replay. A refusal stays latched for this process. */
+  scan(): void {
+    if (this.blocked) return;
+    const found = new Set<string>();
+    const byId = new Map<string, string>();
+    for (const kind of kinds) {
+      const directory = this.directory(kind);
+      let names: string[];
+      try {
+        noLinks(directory);
+        names = present(directory) ? readdirSync(directory) : [];
+      } catch {
+        this.fault(directory, 'Cannot read the capture journal directory.');
+        continue;
+      }
+      for (const name of names) {
+        if (!name.toLowerCase().endsWith('.json')) continue;
+        const path = join(directory, name);
+        found.add(path);
+        const parts = name.slice(0, -5).split('.');
+        let id: string, scopedDevice: string | undefined;
+        try {
+          if (!name.endsWith('.json') || parts.length > 2) throw new Error();
+          id = uuid(parts.at(-1));
+          scopedDevice = parts.length === 2 ? uuid(parts[0]) : undefined;
+        } catch {
+          this.fault(path, 'Invalid capture journal filename.');
+          continue;
+        }
+        const duplicate = byId.get(id);
+        if (duplicate) {
+          this.fault(duplicate, `Conflicting journal for the same capture at ${JSON.stringify(path)}.`);
+          this.fault(path, `Conflicting journal for the same capture at ${JSON.stringify(duplicate)}.`);
+          continue;
+        }
+        byId.set(id, path);
+        let stamp: string;
+        try {
+          const stat = lstatSync(path, { bigint: true });
+          if (!stat.isFile()) throw new Error();
+          stamp = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+        } catch { this.fault(path, 'Cannot inspect the capture journal as a regular file.'); continue; }
+        if (this.stamps.get(path) === stamp) continue;
+        const saved = this.readBody(kind, path);
+        if (!saved) continue;
+        let machineId: string, generation: string;
+        try { machineId = uuid(saved.machineId); generation = uuid(saved.generation); }
+        catch {
+          this.fault(path, 'Missing or invalid capture device or generation.');
+          continue;
+        }
+        if (scopedDevice && scopedDevice !== machineId) {
+          this.fault(path, 'Capture device disagrees with the filename.');
+          continue;
+        }
+        const previous = this.entries.get(id);
+        if (previous && (previous.machineId !== machineId || previous.generation !== generation || previous.path !== path)) {
+          this.fault(path, 'Capture journal location, device or generation changed.');
+          continue;
+        }
+        this.entries.set(id, { kind, id, path, machineId, generation });
+        this.stamps.set(path, stamp);
+      }
+    }
+    for (const { path } of this.entries.values()) if (!found.has(path)) this.fault(path, 'Capture journal disappeared while the runner was active.');
   }
 
-  path(kind: Kind, machineId: string, id: string): string {
-    const directory = this.directory(kind), session = identifier(id);
-    const legacy = join(directory, session + '.json');
-    return present(legacy) ? legacy : join(directory, `${identifier(machineId)}.${session}.json`);
-  }
-
-  read(path: string, machineId: string): Saved {
-    const saved = readRecord(path);
-    if (saved.machineId !== machineId) throw unknownOutcome('Capture journal belongs to another device.');
+  private readBody(kind: Kind, path: string): Saved | undefined {
+    let saved: Saved;
+    try { saved = readRecord(path); }
+    catch { this.fault(path, 'Cannot read or parse the capture journal.'); return; }
+    try { validate(kind, saved); }
+    catch { this.fault(path, 'Invalid capture state or cleanup evidence.'); return; }
     return saved;
   }
 
-  private restore(kind: Kind) {
-    const existing = this.restored.get(kind);
-    if (existing) return existing;
-    const legacy = new Map<string, string[]>();
-    const restored = { legacy, uncertain: false };
-    this.restored.set(kind, restored);
-    let names: string[];
-    try { names = this.names(kind); }
-    catch { restored.uncertain = true; return restored; }
-    for (const name of names) {
-      try {
-        const ids = name.slice(0, -5).split('.');
-        if (ids.length > 2 || ids.some(id => identifier(id) !== id)) throw unknownOutcome('Invalid capture journal filename.');
-        const path = join(this.directory(kind), name);
-        if (ids.length === 2) {
-          // A corrupt body is scoped by its filename. Conflicting ownership on
-          // restore is host-wide uncertainty because either device may be affected.
-          let saved: Saved;
-          try { saved = readRecord(path); } catch { continue; }
-          if (saved.machineId !== ids[0]) restored.uncertain = true;
-        } else {
-          // Legacy filenames carry no device. Read the journal itself and ignore
-          // old ownership sidecars, which can disagree after a partial restore.
-          const device = identifier(readRecord(path).machineId);
-          const sessions = legacy.get(device) ?? [];
-          sessions.push(ids[0]!);
-          legacy.set(device, sessions);
-        }
-      } catch { restored.uncertain = true; }
+  private read(entry: Journal): Saved {
+    const saved = this.readBody(entry.kind, entry.path);
+    if (saved && (saved.machineId !== entry.machineId || saved.generation !== entry.generation)) {
+      this.fault(entry.path, 'Capture device or generation changed.');
     }
-    return restored;
+    this.requireReady();
+    return saved!;
+  }
+
+  private entry(kind: Kind, machineId: string, id: string, generation: string): Journal {
+    this.requireReady();
+    const existing = this.entries.get(id);
+    if (existing && (existing.kind !== kind || existing.machineId !== machineId || existing.generation !== generation)) {
+      this.fault(existing.path, 'Capture journal disagrees with the requested kind, device or generation.');
+      this.requireReady();
+    }
+    return existing ?? { kind, id, machineId, generation, path: join(this.directory(kind), `${machineId}.${id}.json`) };
+  }
+
+  load(kind: Kind, machineId: string, id: string, generation: string): { path: string; saved: Saved } | undefined {
+    const entry = this.entry(kind, uuid(machineId), uuid(id), uuid(generation));
+    return this.entries.has(entry.id) ? { path: entry.path, saved: this.read(entry) } : undefined;
   }
 
   save(kind: Kind, id: string, saved: Saved): void {
-    const machineId = identifier(saved.machineId), path = this.path(kind, machineId, id);
-    if (present(path)) this.read(path, machineId);
-    else if (this.names(kind).some(name => name.endsWith(`.${identifier(id)}.json`))) {
-      throw unknownOutcome('Capture journal belongs to another device.');
-    }
-    saveRecord(path, saved);
+    this.scan();
+    const entry = this.entry(kind, uuid(saved.machineId), uuid(id), uuid(saved.generation));
+    const exists = this.entries.has(entry.id), creating = saved.state === 'attaching';
+    if (creating ? exists : !exists) throw unknownOutcome('Capture journal cannot be created or replaced out of order.');
+    if (exists) this.read(entry);
+    validate(kind, saved);
+    saveRecord(entry.path, saved);
+    this.entries.set(entry.id, entry);
   }
 
-  forDevice(kind: Kind, machineId: string, forAdmission = true): { id: string; path: string; saved: Saved }[] {
-    const device = identifier(machineId), { legacy, uncertain } = this.restore(kind);
-    if (forAdmission && uncertain) throw unknownOutcome('Capture journal ownership is unknown.');
-    const directory = this.directory(kind), prefix = device + '.';
-    const scoped = this.names(kind).filter(name => name.startsWith(prefix));
-    const flat = (legacy.get(device) ?? []).map(id => id + '.json');
-    return [...scoped, ...flat].flatMap(name => {
-      const path = join(directory, name);
-      if (!present(path)) return [];
-      const id = identifier(name.slice(name.startsWith(prefix) ? prefix.length : 0, -5));
-      return [{ id, path, saved: this.read(path, device) }];
-    });
+  forDevice(kind: Kind, machineId: string): { id: string; saved: Saved }[] {
+    this.scan();
+    this.requireReady();
+    return [...this.entries.values()]
+      .filter(entry => entry.kind === kind && entry.machineId === machineId)
+      .map(entry => ({ id: entry.id, saved: this.read(entry) }));
   }
 }

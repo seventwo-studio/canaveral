@@ -248,6 +248,8 @@ export async function recordVideo(
         }
         if (typeof event.data !== "string") throw Error("Invalid message.");
         const message = record(JSON.parse(event.data));
+        if (message.type === "error" && message.code === "capture_journal_uncertain")
+          throw Error("Capture is disabled on this host until an operator resolves its capture journals and restarts the runner.");
         if (message.type === "error" && message.code === "device_live_view_active")
           throw Error("Close the device's live views and wait for cleanup before recording.");
         if (message.type === "error")

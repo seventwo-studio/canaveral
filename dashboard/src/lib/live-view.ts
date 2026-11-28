@@ -120,6 +120,15 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
       "This device is recording or awaiting recording cleanup. Try again after recording ends and cleanup is confirmed.",
     again: "later",
   },
+  capture_journal_uncertain: {
+    message:
+      "Capture is disabled on this host until an operator resolves its capture journals and restarts the runner.",
+    again: "no",
+  },
+  session_incomplete: {
+    message: "The live view ended without confirmed completion.",
+    again: "no",
+  },
   capture_cleanup_pending: {
     message:
       "An earlier capture of this device is still being cleaned up. Try again shortly.",

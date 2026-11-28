@@ -1430,9 +1430,9 @@ confirmed. An unproven live capture keeps its slot and reservation.
 The controller checks and reserves the device in one transaction, and the
 runner independently checks the device before opening a native source. On
 27 November 2026, we chose mutual exclusion because handover repeatedly
-allowed races across mixed controller and runner versions. Keeping the
-reservations mutually exclusive closes those races by construction. The cost
-is that viewers cannot watch a device while it records.
+allowed races across mixed controller and runner versions. The mutual-exclusion
+guarantee applies when the controller and runner both run this version. Viewers
+cannot watch a device while it records.
 
 A recording short of host capacity can still end the oldest eligible live
 capture on a different device. That live capture keeps its reservation until
@@ -1531,18 +1531,17 @@ by the recording path's rules. A wedged encoder never frees capacity.
   and the session becomes clean when the device's host reports the device
   `stopped`. The host reports that only after the emulator process has exited, and
   the recorder ran inside that process. This rule applies to live captures only;
-  recording cleanup is unchanged. After a runner upgrade, an older journal that
-  records the encoder's exit can recover the stop proof from the authenticated
-  controller finish receipt for that capture and generation. Receipt-based
-  recovery requires verified HTTPS or loopback. An omitted heartbeat entry
-  and a remote HTTP controller both leave the guard held.
-- **Journal ownership.** New live and recording journal filenames contain both
-  the device ID and the capture ID. An unreadable journal keeps that device's
-  local capture guard held. At startup, the runner reads legacy journals to
-  establish their ownership and ignores legacy ownership sidecars. A legacy
-  journal with unknown ownership, or a journal whose device ID conflicts with
-  its filename on restore, blocks capture admission across the host. These
-  guards do not prevent the runner from reporting a verified device stop.
+  recording cleanup is unchanged.
+- **Journal ownership.** The runner scans `<stateDir>/work/live` and
+  `<stateDir>/work/video` before replay. It accepts a legacy flat journal when
+  its body identifies exactly one device and no other journal claims that
+  capture. Legacy ownership sidecars are ignored. Unreadable journals, invalid
+  or incomplete records, conflicting copies, and filenames with a noncanonical
+  extension such as `.JSON` disable recordings and live views across the host.
+  The runner refuses them with `capture_journal_uncertain` and suppresses cleanup
+  receipts. The host health report identifies the problem and the runner logs
+  list the affected paths and reasons. Independent device stop proofs still
+  apply.
 - **Unknown.** An unconfirmed encoder exit, an iOS source whose stop is unproven,
   a source whose dispatch outcome is uncertain, or a runner that restarted mid-capture leaves the
   session uncleaned. It keeps its reservation and its host slot, blocks further
@@ -1551,6 +1550,15 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `POST /v1/machines/{machine}/video-sessions/{captureId}/abandon`, at least a
   minute after the capture ended. For an owned Android device whose encoder exit
   was confirmed, stopping the device settles it instead.
+- **Operator recovery.** Take the runner out of service and verify that the
+  affected recorders and encoders have stopped on the devices and host. Once
+  verified, clear the uncertain capture journals in `<stateDir>/work/live` and
+  `<stateDir>/work/video`. Restart the runner. Capture admission resumes only
+  after the restarted runner scans both directories without finding uncertainty.
+  Clearing files and restarting do not release held controller reservations,
+  including requests that had already attached when the refusal took effect.
+  Use the applicable device or lease stop proof, or the abandonment and deletion
+  procedure above, to settle them.
 - **A viewer that leaves early.** A run that is still being opened when its last
   viewer leaves is clean at once if the provider refused before it spawned
   anything, which the provider states explicitly. Once the recorder may have been

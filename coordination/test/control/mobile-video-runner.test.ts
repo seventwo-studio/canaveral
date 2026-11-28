@@ -2,7 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CliClient } from '../../src/account-cli.ts';
@@ -192,12 +192,38 @@ test('restart replays positive cleanup for a recording journaled before native d
   const host = await SessionConnection.connect(f.url, `/v1/hosts/${identity.id}/video-sessions/${recording.id}/${recording.generation}`, identity.credential);
   await f.videoApi.close(f.machineId, recording.id);
   host.close();
-  saveRecord(join(f.config.stateDir, 'work', 'video', recording.id + '.json'), {
+  saveRecord(join(f.config.stateDir, 'work', 'video', `${f.machineId}.${recording.id}.json`), {
     state: 'attaching', generation: recording.generation, machineId: f.machineId,
   });
   await f.restart();
   await f.eventually(async () => (await f.videoApi.inspect(f.machineId, recording.id)).cleaned === true);
   assert.equal(f.captures, 0);
+});
+
+test('a restart without journals retains an already attached recording', { timeout: 15000 }, async t => {
+  const f = await fixture(t), baseline = await f.reservedCpu();
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  const identity = f.runner.identity!;
+  const host = await SessionConnection.connect(f.url, `/v1/hosts/${identity.id}/video-sessions/${recording.id}/${recording.generation}`, identity.credential);
+  try {
+    await f.restart();
+    assert.equal(existsSync(join(f.config.stateDir, 'work', 'video', `${f.machineId}.${recording.id}.json`)), false);
+    assert.equal(f.captures, 0);
+    const current = await f.videoApi.close(f.machineId, recording.id);
+    assert.equal(current.cleaned, false);
+    assert.equal(await f.reservedCpu(), baseline + 1);
+  } finally { host.close(); }
+});
+
+test('a recording queued before journal refusal receives the non-retryable broker error', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const recording = await f.videoApi.create(f.machineId, { ...f.request, id: randomUUID() });
+  saveRecord(join(f.config.stateDir, 'work', 'live', `${randomUUID()}.json`), { generation: randomUUID(), state: 'attaching' });
+  const refused = assert.rejects(f.videoApi.connect(recording, { timeoutMs: 5000 }), { code: 'capture_journal_uncertain', retryable: false });
+  await f.runner.poll(); await f.runner.step();
+  await refused;
+  assert.equal(f.captures, 0);
+  assert.equal((await f.videoApi.inspect(f.machineId, recording.id)).cleaned, false);
 });
 
 test('the runner refuses a recording when an old controller queues an overlapping live capture', { timeout: 15000 }, async t => {

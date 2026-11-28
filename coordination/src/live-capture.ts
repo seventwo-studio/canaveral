@@ -46,7 +46,7 @@ class CaptureFenced extends ServiceError {
   constructor(readonly stop: LeaseCaptureFence) { super('The local lease fence stopped live capture.', 410); }
 }
 export interface LiveHubOptions {
-  load(captureId: string, machineId: string): Record<string, unknown> | undefined;
+  load(captureId: string, machineId: string, generation: string): Record<string, unknown> | undefined;
   save(captureId: string, value: Record<string, unknown>): void;
   /** Delivers the cleanup receipt. A failure is retried later from the saved journal. */
   report(job: LiveCaptureJob, receipt: LiveReceipt): Promise<void>;
@@ -305,7 +305,7 @@ export class LiveCaptureHub {
   /** Joins the device's capture or journals a new one. `source` is undefined when this host
    * cannot capture: the viewer is told so and the capture is reported clean without running. */
   acquire(job: LiveCaptureJob, source: LiveCaptureSource | undefined): LiveCaptureHandle {
-    const journaled = () => { try { return this.options.load(job.id, job.machineId) !== undefined; } catch { return false; } };
+    const journaled = () => { try { return this.options.load(job.id, job.machineId, job.generation) !== undefined; } catch { return false; } };
     // A stopping runner takes no new capture, and never attaches for one it has not journaled.
     if (this.closed) throw new LiveCaptureRefused('This runner is stopping.', false);
     if (this.recordings.has(job.machineId)) throw captureConflict('record');

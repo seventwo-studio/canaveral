@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { identifier } from "../consumers.ts";
 import { object, ServiceError } from "../errors.ts";
-import { LIVE_HOST_END_REASONS, MAX_LIVE_INIT_BYTES, MAX_LIVE_SEGMENT_BYTES, captureConflict } from "../mobile-live.ts";
+import { LIVE_HOST_END_REASONS, MAX_LIVE_INIT_BYTES, MAX_LIVE_SEGMENT_BYTES, captureConflict, captureJournalRefusal } from "../mobile-live.ts";
 import { TUNNEL_RESET_REASONS, TUNNEL_WINDOW_BYTES } from "../tunnel-relay.ts";
 
 export const SESSION_PROTOCOL = "canaveral-session-v1";
@@ -134,6 +134,7 @@ function tunnelControl(value: Record<string, unknown>, side: SessionSide): void 
   }
 }
 export const WORKER_MESSAGES: Readonly<Record<string, string>> = {
+  capture_journal_uncertain: captureJournalRefusal().message,
   device_live_view_active: captureConflict('live').message,
   device_recording_active: captureConflict('record').message,
   capability_unsupported: "This worker does not support the requested access capability. Inspect the session before choosing another environment.",

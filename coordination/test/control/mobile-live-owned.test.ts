@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { startController } from "../../src/main.ts";
 import { startDashboard } from "../../src/dashboard.ts";
 import { HostRunner } from "../../src/host.ts";
-import { readRecord, saveRecord } from "../../src/runtime-process.ts";
+import { saveRecord } from "../../src/runtime-process.ts";
 import type { HostConfig } from "../../src/host.ts";
 import { MobileProvider, markCaptureNotRunning } from "../../src/providers/mobile.ts";
 import type { Authorized, NativePipe, RecordValue } from "../../src/providers/mobile.ts";
@@ -41,11 +41,10 @@ interface Options {
   stop?: "unprovable";
   /** How long a device takes to exit once its stop was requested; 400 ms unless given. */
   stopMs?: number;
-  beforeStart?: (stateDir: string) => void;
 }
 interface Fixture {
   url: string; admin: string; hostId: string; stats: Stats; runner: HostRunner; image: RecordValue; root: string;
-  restartRunner(): Promise<void>;
+  restartRunner(beforeStart?: (runner: HostRunner) => void): Promise<void>;
   api(method: string, route: string, body?: unknown, token?: string): Promise<{ status: number; body: any }>;
   account(username: string): Promise<{ session: string; id: string }>;
   device(owner: string): Promise<string>;
@@ -131,7 +130,6 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
   const config: HostConfig = { url, stateDir: join(root, "runner"), enrollmentToken: enrollment, name: "remote-device-host", provider: os, storage: join(root, "devices"),
     videoEncoder: "/fixture/ffmpeg", templates: [image], capacity: { cpu: 8, memoryMiB: 8192, diskGiB: 32 }, pollIntervalSeconds: .25, concurrency: 4, ...options.config };
   const makeRunner = () => new HostRunner(config, { providerFactory: (settings, state) => new Device({ ...settings, transport: { run: async () => { throw new Error("Native SDK execution is forbidden in this fixture."); } } }, state) });
-  options.beforeStart?.(config.stateDir);
   let runner = makeRunner();
   await runner.start();
   t.after(async () => { await runner.close().catch(() => {}); await controller.close().catch(() => {}); rmSync(root, { recursive: true, force: true }); });
@@ -142,7 +140,7 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
   const password = randomBytes(24).toString("hex");
   const manager = (await api("POST", "/v1/auth/setup", { username: "admin", password })).body.token as string;
   return { url, admin: manager, hostId: runner.identity!.id, stats, get runner() { return runner; }, image, api, root,
-    async restartRunner() { await runner.close(); runner = makeRunner(); await runner.start(); },
+    async restartRunner(beforeStart) { await runner.close(); runner = makeRunner(); beforeStart?.(runner); await runner.start(); },
     async account(username) {
       const user = (await api("POST", "/v1/users", { id: randomUUID(), username }, manager)).body, invite = (await api("POST", `/v1/users/${user.id}/invite`, {}, manager)).body;
       return { session: (await api("POST", "/v1/auth/claim", { token: invite.token, password }, "")).body.token as string, id: user.id as string };
@@ -533,103 +531,6 @@ test("concurrent admissions select one native capture reservation in either orde
   assert.equal(f.stats.captures, 0, "both races completed before a consumer attached");
 });
 
-test("legacy Android live journals require a matching controller cleanup receipt", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner");
-  const machineId = await f.device(owner.session);
-  const viewer = await f.watch(owner.session, machineId);
-  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
-  await until(() => media(viewer.got).length > 0, "the original native capture");
-  const { captureId } = await live.inspect(machineId, viewer.id);
-  const session = async (id: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${id}`, undefined, owner.session)).body;
-  viewer.stream.close(); await viewer.got.done;
-  await until(async () => (await session(captureId)).hostCleaned === true, "the original encoder receipt");
-  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
-  await until(async () => (await session(captureId)).cleaned === true, "the controller's stop proof");
-  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "running" }, owner.session)).status, 200);
-  await until(() => f.runner.reports.get(machineId)?.state === "running", "the restarted device");
-  await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "running", "the controller observing the restarted device");
-
-  const { generation } = await session(captureId);
-  const path = join(f.root, "runner", "work", "live", `${captureId}.json`);
-  rmSync(captureJournal(f.root, machineId, captureId));
-  // Restore the old runner's journal shape after the proof, as if upgrading with the device running.
-  saveRecord(path, { generation, machineId, state: "unknown", cleaned: false, hostCleaned: true });
-  await f.restartRunner();
-  const send = f.runner.transport.request.bind(f.runner.transport), otherGeneration = randomUUID();
-  let result: "absent" | "mismatch" | "match" = "absent";
-  let requests = 0;
-  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
-    if (!args[1].endsWith(`/video-sessions/${captureId}/finish`)) return send(...args);
-    requests++;
-    assert.equal(args[3], f.runner.identity!.credential);
-    assert.deepEqual(args[2], { generation, hostCleaned: true });
-    const receipt = await send(...args);
-    assert.equal(receipt.cleaned, true);
-    if (result === "absent") return {};
-    if (result === "mismatch") return { ...receipt, generation: otherGeneration };
-    return receipt;
-  });
-
-  for (const condition of ["absent", "mismatch"] as const) {
-    result = condition;
-    const next = await live.create(machineId, { id: randomUUID() });
-    await assert.rejects(live.connect(next, { timeoutMs: 5000 }), { code: "device_live_view_active" });
-    await until(async () => (await session(next.captureId)).cleaned === true, "the refused capture to release its reservation");
-    assert.equal(readRecord(path).cleaned, false);
-    assert.equal(f.stats.captures, 1);
-  }
-
-  result = "match";
-  const next = await f.watch(owner.session, machineId);
-  await until(() => media(next.got).length > 0, "capture after the legacy cleanup receipt");
-  assert.equal(readRecord(path).cleaned, true);
-  assert.ok(requests >= 3, "each attempt requested explicit proof");
-  next.stream.close(); await next.got.done;
-});
-
-test("an unreadable journal for a removed device leaves other Android stop proofs and captures available", { timeout: 30000 }, async t => {
-  const removed = { id: randomUUID(), machineId: randomUUID(), generation: randomUUID(), state: "finished", cleaned: true };
-  const removedJournal = (state: string) => join(state, "work", "live", `${removed.machineId}.${removed.id}.json`);
-  const f = await fixture(t, { stop: "unprovable", beforeStart: state => saveRecord(removedJournal(state), removed) });
-  const owner = await f.account("owner"), machineId = await f.device(owner.session);
-  const journal = (id: string) => captureJournal(f.root, machineId, id);
-  const viewer = await f.watch(owner.session, machineId);
-  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
-  await until(() => media(viewer.got).length > 0, "capture on the remaining device");
-  const { captureId } = await live.inspect(machineId, viewer.id);
-  const session = async (id: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${id}`, undefined, owner.session)).body;
-  viewer.stream.close(); await viewer.got.done;
-  await until(async () => (await session(captureId)).hostCleaned === true, "the encoder receipt");
-
-  writeFileSync(removedJournal(join(f.root, "runner")), "unreadable");
-  // The filename still identifies the device when the journal body is unreadable.
-  await f.restartRunner();
-  const proof = Promise.withResolvers<string>();
-  const send = f.runner.transport.request.bind(f.runner.transport);
-  t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof send>) => {
-    if (args[1].endsWith("/heartbeat")) {
-      const report = (args[2].reports as Record<string, RecordValue>)[machineId];
-      if (report?.state === "stopped" || report?.state === "unknown") proof.resolve(String(report.state));
-    }
-    return send(...args);
-  });
-  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
-  assert.equal(await proof.promise, "stopped");
-  await until(async () => (await session(captureId)).cleaned === true, "settlement after the stop proof");
-  assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "running" }, owner.session)).status, 200);
-  await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "running", "the controller observing the restarted device");
-
-  const saved = readRecord(journal(captureId));
-  writeFileSync(journal(captureId), "unreadable");
-  const refused = await live.create(machineId, { id: randomUUID() });
-  await assert.rejects(live.connect(refused, { timeoutMs: 5000 }), { code: "device_live_view_active" });
-  await until(async () => (await session(refused.captureId)).cleaned === true, "the refused capture's cleanup");
-  saveRecord(journal(captureId), saved);
-  const next = await f.watch(owner.session, machineId);
-  await until(() => media(next.got).length > 0, "capture with only the removed device's journal unreadable");
-  next.stream.close(); await next.got.done;
-});
-
 test("a restored flat journal fences its recorded device even when the sidecar names another", { timeout: 30000 }, async t => {
   const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
   const journalId = randomUUID(), work = join(f.root, "runner", "work", "live");
@@ -703,24 +604,100 @@ test("a runner refuses an older controller's unowned live assignment through the
   assert.equal(f.stats.captures, 0);
 });
 
-test("unattributed legacy journals and conflicting scoped journals block admission host-wide", { timeout: 30000 }, async t => {
-  for (const damage of ["unreadable legacy", "wrong device"] as const) await t.test(damage, async t => {
-    const f = await fixture(t), owner = await f.account("owner"), machineId = await f.device(owner.session);
-    const work = join(f.root, "runner", "work", "live");
-    const id = randomUUID(), recorded = { machineId, generation: randomUUID(), state: "started" };
-    if (damage === "unreadable legacy") {
-      const path = join(work, `${id}.json`);
-      saveRecord(path, recorded);
-      writeFileSync(path, "unreadable");
-    } else {
-      saveRecord(join(work, `${randomUUID()}.${id}.json`), recorded);
-    }
-    await f.restartRunner();
+for (const damage of ["flat and scoped copies", "several scoped copies", "uppercase extension", "unparseable body",
+  "unattributable legacy journal", "unknown state", "inconsistent cleanup evidence", "filename ownership mismatch"] as const) {
+  test(`capture journals with ${damage} refuse both kinds without releasing a held capture`, { timeout: 30000 }, async t => {
+    const f = await fixture(t), owner = await f.account("owner");
+    const machineId = await f.device(owner.session), otherDevice = await f.device(owner.session);
+    const video = new MobileVideoClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
     const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
-    const view = await live.create(machineId, { id: randomUUID() });
-    await assert.rejects(live.connect(view, { timeoutMs: 5000 }), { code: "device_live_view_active" });
-    assert.equal(f.stats.captures, 0);
-    assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
-    await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.some((m: RecordValue) => m.id === machineId && m.observed === "stopped"), "independent device stop proof");
+    const viewer = await f.watch(owner.session, machineId);
+    const { captureId } = viewer.stream.view;
+    await until(() => media(viewer.got).length > 0, "a capture whose cleanup receipt will be lost");
+    const finish = `/video-sessions/${captureId}/finish`, cleanupAttempted = Promise.withResolvers<void>();
+    const originalSend = f.runner.transport.request.bind(f.runner.transport);
+    t.mock.method(f.runner.transport, "request", async (...args: Parameters<typeof originalSend>) => {
+      if (args[1].endsWith(finish)) { cleanupAttempted.resolve(); throw Error("Fixture dropped the cleanup receipt."); }
+      return originalSend(...args);
+    });
+    viewer.stream.close(); await viewer.got.done; await cleanupAttempted.promise;
+    const session = () => video.inspect(machineId, captureId);
+    await until(async () => (await session()).state === "disconnected", "the ended capture");
+    const { generation } = await session();
+    const before = await f.reserved();
+
+    const scoped = captureJournal(f.root, machineId, captureId), work = join(f.root, "runner", "work", "live");
+    const flat = join(work, `${captureId}.json`), otherScoped = captureJournal(f.root, otherDevice, captureId);
+    const started = { generation, machineId, state: "started" };
+    const receipts: RecordValue[] = [];
+    let offending = scoped;
+    await f.restartRunner(runner => {
+      switch (damage) {
+        case "flat and scoped copies":
+          saveRecord(scoped, started);
+          saveRecord(flat, { ...started, state: "attaching" });
+          break;
+        case "several scoped copies":
+          saveRecord(scoped, { ...started, state: "attaching" });
+          saveRecord(otherScoped, { ...started, machineId: otherDevice });
+          break;
+        case "uppercase extension":
+          rmSync(scoped);
+          offending = scoped.slice(0, -5) + ".JSON";
+          saveRecord(offending, { ...started, state: "attaching" });
+          break;
+        case "unparseable body":
+          writeFileSync(scoped, "{");
+          break;
+        case "unattributable legacy journal":
+          rmSync(scoped);
+          offending = flat;
+          saveRecord(flat, { generation, state: "attaching" });
+          break;
+        case "unknown state":
+          saveRecord(scoped, { ...started, state: "future_state", cleaned: true });
+          break;
+        case "inconsistent cleanup evidence":
+          saveRecord(scoped, { ...started, cleaned: true });
+          break;
+        case "filename ownership mismatch":
+          saveRecord(scoped, { ...started, machineId: otherDevice });
+          break;
+      }
+      const send = runner.transport.request.bind(runner.transport);
+      t.mock.method(runner.transport, "request", async (...args: Parameters<typeof send>) => {
+        if (args[1].endsWith("/finish") && args[1].includes("/video-sessions/")) receipts.push(args[2]);
+        return send(...args);
+      });
+    });
+    // Publish the refusal and exercise any replay work still listed by the controller.
+    await f.runner.poll(); await f.runner.step();
+    const recording = { fps: 30 as const, durationSeconds: 1, bitRate: 1_000_000 };
+    const assertRefusal = async () => {
+      const error = { code: "capture_journal_uncertain", retryable: false };
+      await assert.rejects(live.create(otherDevice, { id: randomUUID() }), error);
+      await assert.rejects(video.create(otherDevice, { ...recording, id: randomUUID() }), error);
+    };
+    await assertRefusal();
+    const diagnostics = (f.runner.captureHealth().checks as RecordValue[]).find(check => check.id === "capture-journals");
+    assert.ok(String(diagnostics?.detail).includes(offending));
+    if (damage === "flat and scoped copies") assert.ok(String(diagnostics?.detail).includes(flat));
+    if (damage === "several scoped copies") assert.ok(String(diagnostics?.detail).includes(otherScoped));
+    assert.deepEqual(receipts, []);
+    assert.equal((await session()).cleaned, false);
+    assert.deepEqual(await f.reserved(), before);
+    assert.equal(f.stats.captures, 1);
+
+    if (damage === "flat and scoped copies") {
+      // Removing the files while the process is still running cannot lift the refusal.
+      rmSync(flat); rmSync(scoped);
+      await assertRefusal();
+      await f.restartRunner();
+      await f.runner.poll();
+      const resumed = await f.watch(owner.session, otherDevice);
+      await until(() => media(resumed.got).length > 0, "capture after a clean journal scan");
+      resumed.stream.close(); await resumed.got.done;
+      assert.equal((await session()).cleaned, false, "restart does not settle the uncertain capture");
+    }
   });
-});
+}

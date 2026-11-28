@@ -487,3 +487,17 @@ test("a receipt for another view or another kind of session is refused", async (
     reply = base;
   }
 });
+
+test("capture journal refusal is permanent in both admission and the stream", async () => {
+  const code = "capture_journal_uncertain";
+  const opened = await ready();
+  opened.socket.control({ type: "error", code, outcome: "unknown" });
+  expect(opened.seen.endings[0]).toMatchObject({ reason: code, again: "no" });
+
+  reply = () =>
+    response({ code, error: "Capture journals are uncertain." }, 409);
+  const refused = watch();
+  await settle();
+  expect(refused.seen.endings[0]).toMatchObject({ reason: code, again: "no" });
+  expect(sockets).toHaveLength(1);
+});

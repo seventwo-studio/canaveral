@@ -95,14 +95,14 @@ export class MobileLiveViews implements ControlModule {
         this.refresh(db);
         // An ended view stays readable for a while, so its viewer can learn why it ended.
         db.prepare("DELETE FROM mobile_live_views WHERE state='ended' AND COALESCE(ended,created)<?").run(this.store.clock() - RETAIN_SECONDS);
-        const views = db.prepare(`SELECT w.*,c.generation AS capture_generation FROM mobile_live_views w JOIN mobile_video_sessions c ON c.id=w.capture
-          WHERE w.host=? AND w.state IN ('pending','attaching','ready') ORDER BY w.created,w.id LIMIT ?`).all(host, LIVE_VIEWS_PER_HOST) as unknown as (Row & { capture_generation: string })[];
+        const views = db.prepare(`SELECT w.*,c.generation AS capture_generation,c.host_attached AS capture_host_attached FROM mobile_live_views w JOIN mobile_video_sessions c ON c.id=w.capture
+          WHERE w.host=? AND w.state IN ('pending','attaching','ready') ORDER BY w.created,w.id LIMIT ?`).all(host, LIVE_VIEWS_PER_HOST) as unknown as (Row & { capture_generation: string; capture_host_attached: number })[];
         // Held live captures, so the runner can repeat a saved cleanup receipt: the same rule as
         // for recordings, so an abandoned capture of a removed device leaves the runner's queue
         // and no longer keeps it from being idle. Recordings travel in `videoSessions`; a runner
         // that predates live views ignores both fields.
         const captures = db.prepare(`SELECT v.id,v.generation,v.machine,v.state FROM mobile_video_sessions v WHERE v.host=? AND v.kind='live' AND ${HELD_VIDEO_SESSION} ORDER BY v.created,v.id LIMIT 32`).all(host);
-        return { liveViews: views.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine, state: r.state, captureId: r.capture, captureGeneration: r.capture_generation, ...(r.lease ? { leaseId: r.lease } : {}) })),
+        return { liveViews: views.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine, state: r.state, captureId: r.capture, captureGeneration: r.capture_generation, captureHostAttached: r.capture_host_attached === 1, ...(r.lease ? { leaseId: r.lease } : {}) })),
           liveCaptures: captures.map(c => ({ id: c.id, generation: c.generation, machineId: c.machine, state: c.state })) };
       },
     });
@@ -242,6 +242,7 @@ export class MobileLiveViews implements ControlModule {
   private admit(db: DatabaseSync, id: string, m: Record<string, unknown>, credential: string, ttl: number, lease: { id: string; consumer: string; credential: string; member: string } | null): Row {
     requireHostAdmission(db, String(m.host));
     this.video.requireExclusive(db, String(m.id), 'record');
+    this.video.requireCaptureHost(db, String(m.host));
     this.limits(db, m, credential);
     const running = db.prepare("SELECT * FROM mobile_video_sessions WHERE machine=? AND kind='live' AND state IN ('pending','attaching','ready')").get(String(m.id)) as unknown as VideoSessionRow | undefined;
     const capture = running ?? this.video.admitLiveCapture(db, m, CAPTURE_REQUEST, LIVE_VIEW_SECONDS, lease);

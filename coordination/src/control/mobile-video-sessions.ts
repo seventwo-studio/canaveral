@@ -20,7 +20,8 @@ import { uuid } from './transfers.ts';
 import { requireNotPooled } from './pool-ledger.ts';
 import type { SessionSide } from './session-protocol.ts';
 import { ABANDONED_VIDEO_SESSION, COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
-import { captureConflict } from '../mobile-live.ts';
+import { hostHealth } from './infrastructure.ts';
+import { captureConflict, captureJournalRefusal } from '../mobile-live.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
 export type VideoSessionCommand =
   | { type: 'video-sessions.attach'; sessionId: string; generation: string; side: SessionSide; ownerId: string; token: string }
@@ -77,7 +78,7 @@ export class MobileVideoSessions implements ControlModule {
       additionalReservations: (db, host) => { const r = db.prepare(reservations).get(host)!; return { cpu: Number(r.cpu), memoryMiB: Number(r.memoryMiB) }; },
       heartbeatResponse: (db, host) => {
         this.refresh(db);
-        return { videoSessions: (db.prepare(`SELECT * FROM mobile_video_sessions v WHERE v.host=? AND v.kind='record' AND ${HELD_VIDEO_SESSION} ORDER BY created,id LIMIT 4`).all(host) as unknown as Row[]).map(r => ({ ...view(r), hostId: r.host })) };
+        return { videoSessions: (db.prepare(`SELECT * FROM mobile_video_sessions v WHERE v.host=? AND v.kind='record' AND ${HELD_VIDEO_SESSION} ORDER BY created,id LIMIT 4`).all(host) as unknown as Row[]).map(r => ({ ...view(r), hostId: r.host, hostAttached: r.host_attached === 1 })) };
       },
     });
   }
@@ -222,6 +223,10 @@ export class MobileVideoSessions implements ControlModule {
   requireExclusive(db: DatabaseSync, machine: string, other: Row['kind']): void {
     if (this.conflict(db, machine, other)) throw captureConflict(other);
   }
+  requireCaptureHost(db: DatabaseSync, host: string): void {
+    const { capabilities } = hostHealth(db, host, this.store.clock());
+    if (object(capabilities ?? {}).captureJournalsReady === false) throw captureJournalRefusal();
+  }
   private slots(db: DatabaseSync, host: string): number { return Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v WHERE v.host=? AND ${COUNTED_VIDEO_SESSION}`).get(host)!.n); }
   /** The check and the insert run in the same SQLite write transaction as live admission.
    * A recording can preempt a live capture on a different device for host capacity. The
@@ -229,6 +234,7 @@ export class MobileVideoSessions implements ControlModule {
   private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): void {
     const machine = String(m.id), host = String(m.host);
     this.requireExclusive(db, machine, 'live');
+    this.requireCaptureHost(db, host);
     if (this.conflict(db, machine, 'record')) fail(409);
     const available = this.machines.remainingCapacity(db, host);
     const short = (freed: number): number => this.slots(db, host) - freed >= 4 ? 429
