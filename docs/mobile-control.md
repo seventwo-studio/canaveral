@@ -1536,7 +1536,7 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `<stateDir>/work/video` before replay. It accepts a legacy flat journal when
   its body identifies exactly one device and no other journal claims that
   capture. Legacy ownership sidecars are ignored. Unreadable journals, invalid
-  or incomplete records, conflicting copies, and filenames with a noncanonical
+  or incomplete records, duplicate fields, conflicting copies, and filenames with a noncanonical
   extension such as `.JSON` disable recordings and live views across the host.
   The runner refuses them with `capture_journal_uncertain` and suppresses cleanup
   receipts. The host health report identifies the problem and the runner logs

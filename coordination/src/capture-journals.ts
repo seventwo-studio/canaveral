@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { identifier } from './consumers.ts';
 import { captureJournalRefusal } from './mobile-live.ts';
 import { noLinks, present, readRecord, saveRecord, unknownOutcome } from './runtime-process.ts';
+import { strictJson } from './strict-json.ts';
 
 type Kind = 'live' | 'video';
 type Saved = Record<string, unknown>;
@@ -123,7 +124,7 @@ export class CaptureJournals {
 
   private readBody(kind: Kind, path: string): Saved | undefined {
     let saved: Saved;
-    try { saved = readRecord(path); }
+    try { saved = readRecord(path, undefined, strictJson); }
     catch { this.fault(path, 'Cannot read or parse the capture journal.'); return; }
     try { validate(kind, saved); }
     catch { this.fault(path, 'Invalid capture state or cleanup evidence.'); return; }

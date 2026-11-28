@@ -24,7 +24,8 @@ export function privateDirectory(path: string): void {
   const info = lstatSync(path);
   if (!info.isDirectory() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) throw new ServiceError("Host state must be a private owned directory.", 409);
 }
-export function readRecord(path: string, maximum = 1_048_576): RecordValue {
+export function readRecord(path: string, maximum = 1_048_576,
+  parse: (bytes: Buffer) => unknown = bytes => JSON.parse(bytes.toString("utf8")) as unknown): RecordValue {
   noLinks(path);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -32,7 +33,7 @@ export function readRecord(path: string, maximum = 1_048_576): RecordValue {
     if (!stat.isFile() || stat.size > maximum) throw new ServiceError("Invalid private runtime record.", 409);
     const bytes = readFileSync(fd);
     if (bytes.length > maximum) throw new ServiceError("Private runtime record exceeds its bound.", 409);
-    return object(JSON.parse(bytes.toString("utf8")) as unknown);
+    return object(parse(bytes));
   } finally { closeSync(fd); }
 }
 export function syncDirectory(path: string): void { const fd = openSync(path, constants.O_RDONLY); try { fsyncSync(fd); } finally { closeSync(fd); } }

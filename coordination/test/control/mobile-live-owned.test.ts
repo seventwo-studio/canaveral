@@ -604,7 +604,7 @@ test("a runner refuses an older controller's unowned live assignment through the
   assert.equal(f.stats.captures, 0);
 });
 
-for (const damage of ["flat and scoped copies", "several scoped copies", "uppercase extension", "unparseable body",
+for (const damage of ["flat and scoped copies", "several scoped copies", "uppercase extension", "unparseable body", "duplicate fields",
   "unattributable legacy journal", "unknown state", "inconsistent cleanup evidence", "filename ownership mismatch"] as const) {
   test(`capture journals with ${damage} refuse both kinds without releasing a held capture`, { timeout: 30000 }, async t => {
     const f = await fixture(t), owner = await f.account("owner");
@@ -648,6 +648,9 @@ for (const damage of ["flat and scoped copies", "several scoped copies", "upperc
           break;
         case "unparseable body":
           writeFileSync(scoped, "{");
+          break;
+        case "duplicate fields":
+          writeFileSync(scoped, JSON.stringify(started).slice(0, -1) + ',"state":"attaching"}');
           break;
         case "unattributable legacy journal":
           rmSync(scoped);
