@@ -1,4 +1,31 @@
 use super::*;
+
+/// Run live lsof fixtures outside the multithreaded test process. Another test's
+/// helper fork can copy our open descriptors and expose them to lsof until exec,
+/// even when the parent's descriptor has been closed or is close-on-exec.
+#[cfg(target_os = "macos")]
+fn isolated_handle_fixture(name: &str, run: impl FnOnce()) {
+    const CHILD: &str = "CANAVERAL_RECONCILE_FIXTURE";
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let test = format!("{module}::{name}");
+    if std::env::var(CHILD).as_deref() == Ok(test.as_str()) {
+        run();
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test])
+        .env(CHILD, &test)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{test}: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn request(s: &Satellite) -> crate::reconcile::Request {
     let a = s.assignment().unwrap();
     serde_json::from_value(
@@ -61,6 +88,14 @@ fn identities_legacy_and_active_lease_never_remove_storage() {
 #[cfg(target_os = "macos")]
 #[test]
 fn reconciliation_releases_only_after_proof_and_replays_across_reset() {
+    isolated_handle_fixture(
+        "reconciliation_releases_only_after_proof_and_replays_across_reset",
+        releases_and_replays_across_reset,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn releases_and_replays_across_reset() {
     let (_tmp, c) = fixture();
     let mut s = held(&c);
     let req = request(&s);
@@ -89,6 +124,9 @@ fn reconciliation_releases_only_after_proof_and_replays_across_reset() {
         )
         .unwrap();
     w.claim_null = true;
+    // The fake helper prints a fixed sample. Take it when the next claim needs
+    // the clock, after the live handle scan and the durable fixture writes.
+    install_helper(&mut s.config, &fixture_helper_script());
     s.run_once(&mut w).unwrap();
     assert_ne!(s.state.claim_id, w.a.claim_id);
     assert_eq!(s.reconcile(&mut w, req).unwrap(), outcome);
@@ -139,6 +177,14 @@ fn lost_reports_and_missing_storage_retain_exact_intent() {
 #[cfg(target_os = "macos")]
 #[test]
 fn foreign_handle_and_lost_cleanup_reply_never_bypass_recovery() {
+    isolated_handle_fixture(
+        "foreign_handle_and_lost_cleanup_reply_never_bypass_recovery",
+        foreign_handle_and_lost_cleanup_reply,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn foreign_handle_and_lost_cleanup_reply() {
     struct LoseCleanup {
         wire: Wire,
         lose: bool,

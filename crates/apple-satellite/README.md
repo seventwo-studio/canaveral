@@ -502,7 +502,8 @@ helper fork can temporarily retain a copied descriptor until exec. Expected
 state reopening waits within a fixed bound for the ownership error to clear;
 other errors fail immediately. Start records use atomic publication, matching
 the native helper. Keep ordinary test parallelism enabled when verifying these
-boundaries.
+boundaries. Fixtures that require fresh lsof proof run in separate test
+processes so another fixture's helper fork cannot copy their workspace handles.
 
 ### Guest HTTP preview integration
 
