@@ -19,7 +19,7 @@ import { MachineStore, machineDigest, registerMachineHooks } from './machines.ts
 import { uuid } from './transfers.ts';
 import { requireNotPooled } from './pool-ledger.ts';
 import type { SessionSide } from './session-protocol.ts';
-import { COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
+import { ABANDONED_VIDEO_SESSION, COUNTED_VIDEO_SESSION, HELD_VIDEO_SESSION, VIDEO_SESSION_RESERVATION, initializeVideoResolutions, settleLeaseVideoSessions, settleStoppedLiveCaptures } from './video-cleanup.ts';
 import { LIVE_HANDOVER_SECONDS } from '../mobile-live.ts';
 import { legacyMachineReady, leaseScopedMember, legacySessionLease, requireApplicationCapacity } from './leases.ts';
 export type VideoSessionCommand =
@@ -204,6 +204,16 @@ export class MobileVideoSessions implements ControlModule {
       return { status: 201, body: present(db, row(db, id)) };
     });
   }
+  /** Refuses beside ended sessions of a device whose cleanup is not proven, and says whether
+   * waiting can help. Until its deadline the runner may still report an ended session clean
+   * (`capture_cleanup_pending`, retryable). After that, or once it was abandoned, waiting does
+   * not help (`capture_cleanup_unproven`, not retryable): only the device's stop (an owned
+   * Android live capture), the lease's cleanup or the machine's deletion can clear it. */
+  private requireProvenCleanup(ended: Record<string, unknown>[], message: string): void {
+    if (!ended.length) return;
+    const pending = ended.every(r => !r.abandoned && this.store.clock() < Number(r.deadline));
+    throw new ServiceError(message, 409, pending ? { code: 'capture_cleanup_pending', retryable: true } : { code: 'capture_cleanup_unproven', retryable: false });
+  }
   private slots(db: DatabaseSync, host: string): number { return Number(db.prepare(`SELECT COUNT(*) AS n FROM mobile_video_sessions v WHERE v.host=? AND ${COUNTED_VIDEO_SESSION}`).get(host)!.n); }
   /** Admission of a recording. Its own rule is unchanged: one recording per device, and an
    * uncleaned or abandoned recording keeps refusing another until positive cleanup.
@@ -217,13 +227,16 @@ export class MobileVideoSessions implements ControlModule {
    *   and reservation stay counted until the runner proves it stopped, so the host is over its
    *   four slots, or its capacity, by one for that moment.
    *
+   * Beside an ended live capture of the device whose cleanup is not proven, no recording starts;
+   * the refusal says whether waiting can help, as it does for a view.
+   *
    * Returns the seconds to add to the recording's deadline: the bounded wait for the stop proof
    * of this device's live capture, which the recording's own duration must not pay for. */
   private admit(db: DatabaseSync, m: Record<string, unknown>, application?: string): number {
     const machine = String(m.id), host = String(m.host);
     if (db.prepare("SELECT 1 FROM mobile_video_sessions WHERE machine=? AND kind='record' AND cleaned=0").get(machine)) fail(409);
-    const own = db.prepare("SELECT state FROM mobile_video_sessions WHERE machine=? AND kind='live' AND cleaned=0").all(machine);
-    if (own.some(r => !live.includes(String(r.state)))) throw new ServiceError('A prior live capture of this device is not proven clean.', 409, { code: 'capture_cleanup_pending', retryable: true });
+    const own = db.prepare(`SELECT v.state,v.deadline,${ABANDONED_VIDEO_SESSION} AS abandoned FROM mobile_video_sessions v WHERE v.machine=? AND v.kind='live' AND v.cleaned=0`).all(machine);
+    this.requireProvenCleanup(own.filter(r => !live.includes(String(r.state))), 'A prior live capture of this device is not proven clean.');
     if (!own.some(r => live.includes(String(r.state)))) {
       const available = this.machines.remainingCapacity(db, host);
       const short = (freed: number): number => this.slots(db, host) - freed >= 4 ? 429
@@ -244,16 +257,9 @@ export class MobileVideoSessions implements ControlModule {
    * sessions to make room. Beside an ended session of the device whose cleanup is not yet proven,
    * no new capture starts; the refusal says whether waiting can help. */
   admitLiveCapture(db: DatabaseSync, m: Record<string, unknown>, request: string, lifetimeSeconds: number, lease: { id: string; consumer: string; credential: string; member: string } | null): Row {
-    const uncleaned = db.prepare(`SELECT v.kind,v.state,v.deadline,EXISTS (SELECT 1 FROM mobile_video_session_resolutions r WHERE r.session=v.id) AS abandoned
+    const uncleaned = db.prepare(`SELECT v.kind,v.state,v.deadline,${ABANDONED_VIDEO_SESSION} AS abandoned
       FROM mobile_video_sessions v WHERE v.machine=? AND v.cleaned=0`).all(String(m.id));
-    const ended = uncleaned.filter(r => !live.includes(String(r.state)));
-    if (ended.length) {
-      // Until its deadline the runner may still report an ended session clean. After that, or
-      // once it was abandoned, waiting does not help: only the device's stop (an owned Android
-      // capture), the lease's cleanup or the machine's deletion can clear it.
-      const pending = ended.every(r => !r.abandoned && this.store.clock() < Number(r.deadline));
-      throw new ServiceError('An earlier capture of this device is not proven clean.', 409, pending ? { code: 'capture_cleanup_pending', retryable: true } : { code: 'capture_cleanup_unproven', retryable: false });
-    }
+    this.requireProvenCleanup(uncleaned.filter(r => !live.includes(String(r.state))), 'An earlier capture of this device is not proven clean.');
     // A running live capture is joined by the caller; a device never has a second one.
     if (uncleaned.some(r => r.kind === 'live')) fail(409);
     if (!uncleaned.some(r => r.kind === 'record')) {

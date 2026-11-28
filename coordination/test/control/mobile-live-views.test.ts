@@ -196,6 +196,30 @@ test("a recording in progress does not refuse a live view, a running live captur
   assert.deepEqual([f.read(again).state, f.read(again).endReason], ["ended", "capture_ended"]);
 });
 
+test("beside a live capture that ended without cleanup proof, a view and a recording are told alike whether waiting helps", t => {
+  const f = fixture(t), machine = f.ids[0]!;
+  const record = () => object(f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 30, bitRate: 4_000_000 }))!.body) as { state: string };
+  const told = (code: string, retryable: boolean) => (error: unknown) => error instanceof ServiceError && error.status === 409 && error.code === code && error.retryable === retryable;
+  const view = f.create(); f.attach(view, "consumer"); f.attach(view, "host"); f.close(view);
+  assert.deepEqual([f.capture(view).state, f.capture(view).cleaned], ["disconnected", false]);
+  // The runner has a minute from the capture's end to report that it stopped: waiting may help.
+  f.advance(50);
+  assert.throws(() => f.create(), told("capture_cleanup_pending", true));
+  assert.throws(() => record(), told("capture_cleanup_pending", true), "a recording gets the same stable code, not a bare conflict");
+  // After that minute nothing a caller can wait for clears the device.
+  f.advance(11);
+  assert.throws(() => f.create(), told("capture_cleanup_unproven", false));
+  assert.throws(() => record(), told("capture_cleanup_unproven", false));
+  // Abandonment claims no cleanup, so it changes neither answer.
+  f.video.handle(f.req("POST", `/v1/machines/${machine}/video-sessions/${view.captureId}/abandon`, { reason: "The runner never reported this capture's stop." }, f.adminToken));
+  assert.equal(object(f.capture(view).resolution).decision, "abandoned");
+  assert.throws(() => f.create(), told("capture_cleanup_unproven", false));
+  assert.throws(() => record(), told("capture_cleanup_unproven", false));
+  // Only positive proof does, however late it arrives.
+  f.video.handle(f.req("POST", `/v1/hosts/${f.host}/video-sessions/${view.captureId}/finish`, { generation: String(f.capture(view).generation), cleaned: true }, f.hostToken));
+  assert.equal(record().state, "pending");
+});
+
 test("a controller restart ends every view, and runners are told of views and held captures separately from recordings", t => {
   const f = fixture(t), view = f.create();
   f.attach(view, "consumer");

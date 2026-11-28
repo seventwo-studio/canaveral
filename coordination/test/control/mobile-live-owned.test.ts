@@ -2,19 +2,19 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startController } from "../../src/main.ts";
 import { startDashboard } from "../../src/dashboard.ts";
 import { HostRunner } from "../../src/host.ts";
 import type { HostConfig } from "../../src/host.ts";
-import { MobileProvider } from "../../src/providers/mobile.ts";
+import { MobileProvider, markCaptureNotRunning } from "../../src/providers/mobile.ts";
 import type { Authorized, NativePipe, RecordValue } from "../../src/providers/mobile.ts";
 import { MachineLiveClient, MobileVideoClient } from "../../src/video-sdk.ts";
 import type { LiveStream } from "../../src/video-sdk.ts";
 import { ConsumerServiceError } from "../../src/consumer-client.ts";
-import { FragmentEncoder, collect, ordered } from "./live-fixture.ts";
+import { FragmentEncoder, collect, ordered, stoppedWithin } from "./live-fixture.ts";
 import { liveSegmentValid } from "../../src/mobile-live.ts";
 
 /** Live views of account-owned devices: a real controller, broker, dashboard gateway, HostRunner
@@ -36,6 +36,8 @@ interface Options {
   config?: RecordValue;
   /** The native source cannot be proven stopped after an early end. */
   stop?: "unprovable";
+  /** How long a device takes to exit once its stop was requested; 400 ms unless given. */
+  stopMs?: number;
 }
 interface Fixture {
   url: string; admin: string; hostId: string; stats: Stats; runner: HostRunner; image: RecordValue; root: string;
@@ -50,23 +52,45 @@ async function fixture(t: TestContext, options: Options = {}): Promise<Fixture> 
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "enroll"), enrollment, { mode: 0o600 });
   const controller = await startController({ statePath: join(root, "controller.sqlite"), adminTokenFile: join(root, "admin"), enrollmentTokenFile: join(root, "enroll"), controllerId: randomUUID(), listen: { host: "127.0.0.1", port: 0 } });
   const url = `http://127.0.0.1:${controller.address.port}`, stats: Stats = { captures: 0, open: 0, peak: 0, encoders: 0, encodersOpen: 0 };
+  const devices = new Map<string, { exitAt?: number; recorders: Set<() => void> }>();
   const image: RecordValue = os === "android"
     ? { id: "live-phone", revision: "1", os, arch: "arm64", mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { systemImage: "system-images;android-35;google_apis;arm64-v8a", profile: "pixel_8" } }
     : { id: "live-iphone", revision: "1", os, arch: "arm64", mode: "device", minimum: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, device: { runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-0", deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-16" } };
   class Device extends MobileProvider {
     override readonly kind = os;
     async check() { return { ready: true, nativeAcceptance: false }; }
-    async reconcile(machine: RecordValue) { return { state: machine.desired }; }
+    /** A device is a process that takes a moment to exit. Like the Android and iOS providers, this
+     * one reports `stopping` while the process is there and `stopped` only once it is gone. */
+    async reconcile(machine: RecordValue) {
+      const id = String(machine.id), device = devices.get(id);
+      if (machine.desired === "running") {
+        if (device?.exitAt !== undefined) return { state: "stopping" };
+        if (!device) devices.set(id, { recorders: new Set() });
+        return { state: "running" };
+      }
+      if (!device) return { state: "stopped" };
+      if (device.exitAt === undefined) {
+        device.exitAt = Date.now() + (options.stopMs ?? 400);
+        // An Android guest recorder runs inside the device's process and ends with it.
+        setTimeout(() => { for (const end of device.recorders) end(); devices.delete(id); }, options.stopMs ?? 400).unref();
+      }
+      return { state: "stopping" };
+    }
     /** A frame every 40 ms until the run's time limit, then a clean end, as a native source does. */
-    async openVideo(_machine: RecordValue, _image: RecordValue, _folder: string, video: { fps: number; durationSeconds: number; bitRate: number }, check: Authorized, cleanupCheck?: Authorized): Promise<NativePipe> {
-      assert.equal(video.fps, 30); assert.ok(await check());
+    async openVideo(machine: RecordValue, _image: RecordValue, _folder: string, video: { fps: number; durationSeconds: number; bitRate: number }, check: Authorized, cleanupCheck?: Authorized): Promise<NativePipe> {
+      assert.equal(video.fps, 30);
+      // The preflight of a real provider: a refusal before anything is spawned says so.
+      const device = devices.get(String(machine.id));
+      if (!await check() || !device || device.exitAt !== undefined) throw markCaptureNotRunning(new Error("capture refused before any source was started"));
       stats.captures++; stats.open++; stats.peak = Math.max(stats.peak, stats.open);
-      const started = Date.now(); let completed = false, frame = 0, closing: Promise<void> | undefined;
-      const stopped = () => { if (stats.open > 0) stats.open--; };
+      const started = Date.now(); let completed = false, frame = 0, closing: Promise<void> | undefined, running = true;
+      const stopped = () => { if (running) { running = false; device.recorders.delete(stopped); if (stats.open > 0) stats.open--; } };
+      if (os === "android") device.recorders.add(stopped);
       return {
         async read() {
           for (;;) {
             if (closing) throw new Error("capture closed");
+            if (!running && !completed) throw new Error("the device's process is gone");
             if (!await check()) throw new Error("capture authorization ended");
             if (Date.now() - started >= video.durationSeconds * 1000) { if (!completed) { completed = true; stopped(); } return Buffer.alloc(0); }
             await sleep(40);
@@ -184,9 +208,11 @@ test("stopping a watched device ends its views, and its capture and compute are 
   // A deletion is refused while the device's capture is live.
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/delete`, { id: randomUUID() }, owner.session)).status, 409);
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
+  const asked = Date.now();
   await viewer.got.done;
   assert.deepEqual(viewer.stream.ended, { reason: "device_stopped", source: "controller" });
-  // Whichever came first, the runner's own recorder proof or the device's proven stop, releases it.
+  stoppedWithin(t, viewer.got, asked, "device stop");
+  // Whichever came first, the runner's own recorder proof or the device's observed stop, releases it.
   await until(async () => (await session()).body.cleaned === true, "capture cleanup");
   assert.equal(f.stats.encodersOpen, 0);
   await until(async () => { const reserved = await f.reserved(); return reserved.cpu === Number(base.cpu) - 1 && reserved.memoryMiB === Number(base.memoryMiB) - 1024; }, "neither the stopped device's compute nor its capture reserved");
@@ -194,8 +220,9 @@ test("stopping a watched device ends its views, and its capture and compute are 
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/live-views`, { id: randomUUID() }, owner.session)).status, 409);
 });
 
-test("an Android capture whose recorder stop is unproven stays reserved until its device is proven stopped, then the device can be watched again", { timeout: 120000 }, async t => {
-  const f = await fixture(t, { stop: "unprovable" }), owner = await f.account("owner");
+test("an Android capture whose recorder stop is unproven stays reserved until its device is observed stopped, then the device can be watched again", { timeout: 120000 }, async t => {
+  // The device takes a second and a half to exit once it is told to stop.
+  const f = await fixture(t, { stop: "unprovable", stopMs: 1500 }), owner = await f.account("owner");
   const machineId = await f.device(owner.session), base = await f.reserved();
   const viewer = await f.watch(owner.session, machineId);
   await until(() => media(viewer.got).length >= 3, "live segments");
@@ -212,9 +239,23 @@ test("an Android capture whose recorder stop is unproven stays reserved until it
   assert.deepEqual(await f.reserved(), { ...base, cpu: Number(base.cpu) + 1, memoryMiB: Number(base.memoryMiB) + 256 });
   const blocked = await f.api("POST", `/v1/machines/${machineId}/live-views`, { id: randomUUID() }, owner.session);
   assert.equal(blocked.status, 409); assert.equal(blocked.body.code, "capture_cleanup_pending"); assert.equal(blocked.body.retryable, true);
-  // The device's own proven stop is the recorder's proof: no administrator is needed.
+  // The device's own observed stop is the recorder's proof: no administrator is needed. Being asked
+  // to stop proves nothing. While its process is still there, and its recorder with it, the capture
+  // stays held. (The session is read before the device, and a stop is final, so a device that is
+  // not yet stopped means the session was read before the stop.)
+  const observed = async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed as string;
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
-  await until(async () => (await session()).body.cleaned === true, "cleanup settled by the device's stop");
+  let stopping = 0;
+  for (const asked = Date.now();;) {
+    const before = (await session()).body, state = await observed();
+    if (state === "stopped") break;
+    assert.equal(before.cleaned, false, `the capture was released while the device was ${state}`);
+    if (state === "stopping" && f.stats.open === 1) stopping++;
+    assert.ok(Date.now() - asked < 20000, "the device stopped in time"); await sleep(50);
+  }
+  assert.ok(stopping > 0, "the device was observed stopping, its recorder still running, while the capture was held");
+  assert.equal(f.stats.open, 0, "the recorder ended with the device's process before the provider reported it stopped");
+  await until(async () => (await session()).body.cleaned === true, "cleanup settled by the device's observed stop");
   // Started again, the device can be watched again.
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "running" }, owner.session)).status, 200);
   await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "running", "the restarted device");
@@ -230,9 +271,11 @@ test("a view ends when its credential is revoked, and an unprovable capture stop
   const viewer = await f.watch(issued.token as string, machineId);
   await until(() => media(viewer.got).length >= 3, "live segments");
   assert.equal((await f.api("POST", `/v1/auth/tokens/${issued.id}/revoke`, {}, owner.session)).status, 200);
+  const revoked = Date.now();
   await viewer.got.done;
   // The revoked token can no longer read why its view ended.
   assert.deepEqual(viewer.stream.ended, { reason: "credential_rejected", source: "controller" });
+  stoppedWithin(t, viewer.got, revoked, "credential revocation");
   await until(() => f.stats.encodersOpen === 0, "the encoder to exit");
   // This iOS source could not be proven stopped (as idb's stop cannot on some installations): the
   // capture stays reserved. A device stop does not settle it, because the source is a host process.
@@ -245,7 +288,9 @@ test("a view ends when its credential is revoked, and an unprovable capture stop
   assert.deepEqual(await f.reserved(), { ...base, cpu: Number(base.cpu) + 1, memoryMiB: Number(base.memoryMiB) + 256 });
   const refused = await f.api("POST", `/v1/machines/${machineId}/live-views`, { id: randomUUID() }, owner.session);
   assert.equal(refused.status, 409); assert.equal(refused.body.code, "capture_cleanup_pending");
-  assert.equal((await f.api("POST", `/v1/machines/${machineId}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 4_000_000 }, owner.session)).status, 409);
+  // A recording is told the same, with the same honest retry guidance, while the runner may still report.
+  const recording = await f.api("POST", `/v1/machines/${machineId}/video-sessions`, { id: randomUUID(), fps: 30, durationSeconds: 2, bitRate: 4_000_000 }, owner.session);
+  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "capture_cleanup_pending", true]);
   assert.equal((await f.api("POST", `/v1/machines/${machineId}/desired`, { state: "stopped" }, owner.session)).status, 200);
   await until(async () => (await f.api("GET", "/v1/machines", undefined, owner.session)).body.machines.find((m: RecordValue) => m.id === machineId)?.observed === "stopped", "a stopped device");
   assert.equal((await session()).body.cleaned, false);
@@ -362,4 +407,71 @@ test("live captures and recordings share the host's four video session slots", {
   for (const viewer of [...viewers, joined, fifth]) { viewer.stream.close(); await viewer.got.done; }
   await until(async () => Number((await f.reserved()).cpu) === 5, "every capture released");
   assert.ok(f.stats.peak <= 4);
+});
+
+test("when one of two viewers loses its authority the other keeps the same capture, without a gap or a second capture", { timeout: 120000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner");
+  const machineId = await f.device(owner.session), base = await f.reserved();
+  const issued = (await f.api("POST", "/v1/auth/tokens", { id: randomUUID(), name: "viewer", scopes: ["machines:access"], expiresInSeconds: 600 }, owner.session)).body;
+  const kept = await f.watch(owner.session, machineId), lost = await f.watch(issued.token as string, machineId);
+  await until(() => media(kept.got).length >= 4 && media(lost.got).length >= 4, "segments for both viewers");
+  assert.equal(lost.stream.view.captureId, kept.stream.view.captureId);
+  assert.equal((await f.api("POST", `/v1/auth/tokens/${issued.id}/revoke`, {}, owner.session)).status, 200);
+  const revoked = Date.now(), before = media(kept.got).length;
+  await lost.got.done;
+  assert.deepEqual(lost.stream.ended, { reason: "credential_rejected", source: "controller" });
+  stoppedWithin(t, lost.got, revoked, "credential revocation beside another viewer");
+  // The other viewer's capture went on: the same capture and run, every segment in sequence.
+  await until(() => media(kept.got).length >= before + 12, "segments after the other viewer lost its authority");
+  assert.equal(kept.stream.ended, undefined);
+  const segments = media(kept.got);
+  assert.ok(segments.every((s, i) => i === 0 || s.epoch === segments[0]!.epoch && s.sequence === segments[i - 1]!.sequence + 1), "one run without a gap");
+  assert.deepEqual([f.stats.captures, f.stats.open, f.stats.peak, f.stats.encoders], [1, 1, 1, 1]);
+  assert.deepEqual(await f.reserved(), { ...base, cpu: Number(base.cpu) + 1, memoryMiB: Number(base.memoryMiB) + 256 });
+  // The same when the other viewer is closed by its holder instead.
+  const closed = await f.watch(owner.session, machineId);
+  await until(() => media(closed.got).length >= 2, "segments for a third viewer");
+  await new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true }).close(machineId, closed.id);
+  const at = Date.now(), count = media(kept.got).length;
+  await closed.got.done;
+  assert.deepEqual(closed.stream.ended, { reason: "closed", source: "controller" });
+  stoppedWithin(t, closed.got, at, "close beside another viewer");
+  await until(() => media(kept.got).length >= count + 8, "segments after another view was closed");
+  assert.ok(ordered(kept.got.segments)); assert.equal(f.stats.captures, 1);
+  kept.stream.close(); await kept.got.done;
+  await until(async () => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${kept.stream.view.captureId}`, undefined, owner.session)).body.cleaned === true, "positive capture cleanup");
+  assert.deepEqual(await f.reserved(), base);
+});
+
+test("a runner that stops proves its running capture clean first, and a view that arrives meanwhile is never attached or journaled", { timeout: 120000 }, async t => {
+  const f = await fixture(t), owner = await f.account("owner");
+  const watched = await f.device(owner.session), other = await f.device(owner.session), base = await f.reserved();
+  const live = new MachineLiveClient({ baseUrl: f.url, credential: owner.session, allowLoopbackHttp: true });
+  const journal = (capture: string) => join(f.root, "runner", "work", "live", `${capture}.json`);
+  const session = async (machineId: string, capture: string) => (await f.api("GET", `/v1/machines/${machineId}/video-sessions/${capture}`, undefined, owner.session)).body;
+  const viewer = await f.watch(owner.session, watched);
+  await until(() => media(viewer.got).length >= 3, "live segments");
+  const capture = viewer.stream.view.captureId;
+  // The runner begins to stop, and a view of another device arrives while it does.
+  const stopping = f.runner.close(), late = await live.create(other, { id: randomUUID() });
+  await stopping;
+  await viewer.got.done;
+  // Its viewer is told by the host, in-band, that the capture is ending.
+  assert.deepEqual(viewer.stream.ended, { reason: "capture_ended", source: "host" });
+  // The running capture was stopped and proven while the runner still could, and reported.
+  const saved = JSON.parse(readFileSync(journal(capture), "utf8"));
+  assert.deepEqual([saved.state, saved.cleaned], ["finished", true]);
+  assert.deepEqual([f.stats.open, f.stats.encodersOpen], [0, 0]);
+  assert.equal((await session(watched, capture)).cleaned, true, "the receipt reached the controller before the runner let go");
+  // The late view was taken by no one: no journal, no attachment, nothing native.
+  assert.equal(existsSync(journal(late.captureId)), false);
+  assert.equal(f.stats.captures, 1);
+  assert.equal((await live.inspect(other, late.id)).state, "pending");
+  assert.equal((await session(other, late.captureId)).state, "pending");
+  // Its capture never had a host attached, so the controller releases it by itself: no receipt
+  // is owed, and nothing is left for an administrator.
+  assert.equal((await live.close(other, late.id)).state, "ended");
+  const released = await session(other, late.captureId);
+  assert.deepEqual([released.state, released.cleaned], ["disconnected", true]);
+  assert.deepEqual(await f.reserved(), base);
 });

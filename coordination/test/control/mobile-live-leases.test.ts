@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { LeaseClient } from "../../src/sdk.ts";
-import { LeaseLiveClient } from "../../src/video-sdk.ts";
+import { LeaseLiveClient, MobileVideoClient } from "../../src/video-sdk.ts";
 import type { LiveStream } from "../../src/video-sdk.ts";
 import { LIVE_BIT_RATE } from "../../src/mobile-live.ts";
 import { acquire, alive, cleaned, harness, operate, skip, supervised, until } from "./android-fixture.ts";
 import type { Harness } from "./android-fixture.ts";
-import { collect, ordered, schemaValid } from "./live-fixture.ts";
+import { collect, ordered, schemaValid, stoppedWithin } from "./live-fixture.ts";
 import { consumerApiSchema } from "../../src/contracts.ts";
 
 /** Live views of leased Android emulators, on the disposable lease harness: a real controller,
@@ -17,6 +17,8 @@ import { consumerApiSchema } from "../../src/contracts.ts";
  * a real encoder's stream decodes, its frame rate or its latency: no device or FFmpeg runs. */
 const LEASE = { cpu: 2, memoryMiB: 2048, diskGiB: 8 }, WITH_CAPTURE = { cpu: 3, memoryMiB: 2304, diskGiB: 8 };
 const VIDEO = { fps: 30 as const, bitRate: 4_000_000 };
+/** Supervisor loss is found by the capture's native check, about once a second, not by a request. */
+const SUPERVISOR_LOSS_MS = 2500;
 function client(h: Harness, lease: { id: string; key: string }): LeaseClient { return new LeaseClient({ baseUrl: h.url, leaseId: lease.id, leaseKey: lease.key, allowLoopbackHttp: true }); }
 function sink(): { chunks: Buffer[]; write(bytes: Uint8Array): number } { const chunks: Buffer[] = []; return { chunks, write(bytes) { chunks.push(Buffer.from(bytes)); return bytes.length; } }; }
 const media = (stream: ReturnType<typeof collect>) => stream.segments.filter(s => s.kind === "media");
@@ -71,6 +73,12 @@ test("a lease key watches its own emulator live: ordered segments, one shared ca
   // No operator or owner view of a leased device exists: the machine route refuses it.
   assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/live-views`, { id: randomUUID() }, h.admin)).status, 409);
   assert.equal((await h.api("GET", `/v1/machines/${a.machineId}/live-views/${first.id}`, undefined, h.admin)).status, 404);
+  // An administrator sees the capture as a video session of the machine, as for a lease recording:
+  // metadata only. That session has no attachment of its own, so there is no stream to reach.
+  const metadata = await h.api("GET", `/v1/machines/${a.machineId}/video-sessions/${view.captureId}`, undefined, h.admin);
+  assert.deepEqual([metadata.status, metadata.body.kind, metadata.body.leaseId, metadata.body.state, metadata.body.cleaned], [200, "live", a.id, "ready", false]);
+  assert.equal((await h.api("GET", `/v1/machines/${a.machineId}/video-sessions/${view.captureId}`, undefined, app)).status, 401);
+  await assert.rejects(new MobileVideoClient({ baseUrl: h.url, credential: h.admin, allowLoopbackHttp: true }).connect(metadata.body, { timeoutMs: 5000 }));
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "other" }, a.key)).status, 404);
   // At most four viewers per device.
   const extra = [await watching(h, a), await watching(h, a)];
@@ -104,7 +112,15 @@ test("a lease key watches its own emulator live: ordered segments, one shared ca
   await until(() => media(again.got).length >= 2, "segments of a new capture");
   assert.notEqual((await live.inspect(again.id)).captureId, view.captureId);
   assert.equal(h.media.started.get(name)!.length, 2); assert.equal(h.media.peak, 1);
-  again.stream.close(); await again.got.done;
+  // An administrator can end the capture through that same route; the lease's views end with it.
+  const third = (await live.inspect(again.id)).captureId;
+  assert.equal((await h.api("POST", `/v1/machines/${a.machineId}/video-sessions/${third}/close`, {}, h.admin)).status, 200);
+  const ended = Date.now();
+  await again.got.done;
+  assert.equal(again.stream.ended!.reason, "capture_ended", JSON.stringify(again.stream.ended));
+  stoppedWithin(t, again.got, ended, "an administrator's close of the capture");
+  assert.equal((await live.inspect(again.id)).endReason, "capture_ended");
+  await until(async () => (await client(h, a).video.inspect(third)).cleaned === true, "cleanup of the capture an administrator closed");
   for (const lease of [a, b]) assert.equal((await h.api("POST", `/v1/leases/${lease.id}/release`, { id: randomUUID() }, lease.key)).status, 200);
   await cleaned(h, app, a.id); await cleaned(h, app, b.id);
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
@@ -117,9 +133,10 @@ test("a view lives while its viewer renews it, expires when it does not, and clo
   // Two ten-second views of one capture: one renews as it is consumed, the other never does.
   const kept = await watching(h, a, { ttlSeconds: 10 }), idle = await watching(h, a, { ttlSeconds: 10 }, { autoRenew: false });
   await until(() => media(kept.got).length >= 2 && media(idle.got).length >= 2, "segments for both viewers");
-  const initial = Date.parse((await live.inspect(kept.id)).authorizationDeadline);
+  const initial = Date.parse((await live.inspect(kept.id)).authorizationDeadline), lapse = Date.parse((await live.inspect(idle.id)).authorizationDeadline);
   await idle.got.done;
   assert.deepEqual(idle.stream.ended, { reason: "view_expired", source: "controller" });
+  stoppedWithin(t, idle.got, lapse, "an unrenewed view's deadline");
   assert.deepEqual([(await live.inspect(idle.id)).state, (await live.inspect(idle.id)).endReason], ["ended", "view_expired"]);
   // The renewed view outlived its original deadline and still streams; renewal never touched the lease.
   assert.equal(kept.stream.ended, undefined);
@@ -133,8 +150,10 @@ test("a view lives while its viewer renews it, expires when it does not, and clo
   assert.equal((await h.api("GET", `/v1/leases/${a.id}`, undefined, a.key)).body.expiresAt, expires);
   // The holder closes a view through its route; the viewer learns why from the controller.
   assert.equal((await live.close(kept.id)).endReason, "closed");
+  const closed = Date.now();
   await kept.got.done;
   assert.deepEqual(kept.stream.ended, { reason: "closed", source: "controller" });
+  stoppedWithin(t, kept.got, closed, "close");
   await until(async () => (await client(h, a).video.inspect(renewed.captureId)).cleaned === true, "capture cleanup after the last view closed");
   assert.deepEqual(await h.reserved(), LEASE);
 });
@@ -154,11 +173,13 @@ test("a live view ends with its lease at expiry, and its capture is released onl
     await until(() => media(viewer.got).length >= 3, "live segments");
     assert.deepEqual(await h.reserved(), WITH_CAPTURE);
     const view = await lease.live.inspect(viewer.id);
+    const expiry = Date.parse((await h.api("GET", `/v1/leases/${a.id}`, undefined, a.key)).body.expiresAt);
     // The lease expires while the view is watched: the stream ends, and says why.
     await viewer.got.done;
     assert.equal(viewer.got.failure(), undefined);
     assert.ok(["lease_expired", "lease_failed"].includes(viewer.stream.ended!.reason), JSON.stringify(viewer.stream.ended));
     t.diagnostic(`stream end at expiry: ${JSON.stringify(viewer.stream.ended)}`);
+    stoppedWithin(t, viewer.got, expiry, "lease expiry");
     assert.ok(ordered(viewer.got.segments));
     await until(async () => ["expired", "failed"].includes((await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state), "terminal lease");
     assert.ok(Date.now() - h.media.recorders.get(name)!.started < 30000, "the capture ended with the lease, not at its time limit");
@@ -195,8 +216,9 @@ test("key rotation and release each end a live view; the runner's exact-recorder
   // stops and proves the exact guest recorder itself.
   const first = await watching(h, a);
   await until(() => media(first.got).length >= 3, "live segments");
-  const key = (await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app)).body.credential as string, lease = client(h, { id: a.id, key });
+  const key = (await h.api("POST", `/v1/leases/${a.id}/credential`, {}, app)).body.credential as string, lease = client(h, { id: a.id, key }), rotated = Date.now();
   await first.got.done;
+  stoppedWithin(t, first.got, rotated, "key rotation");
   // The rotated key can no longer read why; the current key can.
   assert.deepEqual(first.stream.ended, { reason: "credential_rejected", source: "controller" });
   const ended = await lease.live.inspect(first.id);
@@ -210,8 +232,10 @@ test("key rotation and release each end a live view; the runner's exact-recorder
   await until(() => media(second.got).length >= 3, "segments under the new key");
   const capture = (await lease.live.inspect(second.id)).captureId;
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, key)).status, 200);
+  const released = Date.now();
   await second.got.done;
   assert.deepEqual(second.stream.ended, { reason: "lease_released", source: "controller" });
+  stoppedWithin(t, second.got, released, "release");
   await cleaned(h, app, a.id);
   await until(async () => (await lease.video.inspect(capture)).cleaned === true, "capture released after proof");
   assert.deepEqual(await h.reserved(), { cpu: 0, memoryMiB: 0, diskGiB: 0 });
@@ -224,11 +248,15 @@ test("supervisor loss mid-view ends the stream, fails the lease and holds the ca
   await until(() => media(viewer.got).length >= 3, "live segments");
   const capture = (await lease.live.inspect(viewer.id)).captureId, killed = Date.now();
   process.kill(group.supervisorPid, "SIGKILL");
-  // The capture's native check sees the free supervisor lock within about a second.
+  // No request ends this authority: the capture's native check finds the supervisor's lock free.
+  // That check runs about once a second, so this ending has its own, longer bound.
   await viewer.got.done;
-  assert.ok(Date.now() - killed < 10000, "the stream ended promptly");
-  assert.ok(["capture_failed", "lease_failed", "device_stopped", "host_unavailable", "disconnected"].includes(viewer.stream.ended!.reason), JSON.stringify(viewer.stream.ended));
   t.diagnostic(`stream end at supervisor loss after ${Date.now() - killed} ms: ${JSON.stringify(viewer.stream.ended)}`);
+  stoppedWithin(t, viewer.got, killed, "supervisor loss", SUPERVISOR_LOSS_MS);
+  assert.ok(Date.now() - killed < SUPERVISOR_LOSS_MS + 5000, "the viewer learned of the ending within the reason window");
+  // The lease fails when the runner's fence report arrives. A view whose device or socket cause was
+  // recorded more than three seconds before that keeps it, as documented for provisional reasons.
+  assert.ok(["capture_failed", "lease_failed", "device_stopped", "host_unavailable", "disconnected"].includes(viewer.stream.ended!.reason), JSON.stringify(viewer.stream.ended));
   await until(async () => (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.state === "failed", "failed lease", 15000);
   await until(async () => { const session = await lease.video.inspect(capture); return session.hostCleaned === true || session.cleaned === true; }, "capture teardown", 30000);
   await until(async () => (await h.api("GET", `/v1/leases/${a.id}`, undefined, app)).body.cleanup.state === "blocked", "blocked cleanup");
@@ -258,8 +286,9 @@ test("a wedged encoder keeps the live capture reserved, blocks another capture o
   assert.deepEqual(await h.reserved(), WITH_CAPTURE);
   // Neither a new view nor a recording may start on a device whose capture is unproven.
   const again = await h.api("POST", `/v1/leases/${a.id}/live-views`, { id: randomUUID(), member: "primary" }, a.key);
-  assert.equal(again.status, 409); assert.equal(again.body.code, "capture_cleanup_pending");
-  assert.equal((await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key)).status, 409);
+  assert.deepEqual([again.status, again.body.code, again.body.retryable], [409, "capture_cleanup_pending", true]);
+  const recording = await h.api("POST", `/v1/leases/${a.id}/video-sessions`, { id: randomUUID(), member: "primary", durationSeconds: 2, ...VIDEO }, a.key);
+  assert.deepEqual([recording.status, recording.body.code, recording.body.retryable], [409, "capture_cleanup_pending", true]);
   // Lease cleanup proves the emulator gone, but not this host's encoder: still held.
   assert.equal((await h.api("POST", `/v1/leases/${a.id}/release`, { id: randomUUID() }, a.key)).status, 200);
   await cleaned(h, app, a.id);

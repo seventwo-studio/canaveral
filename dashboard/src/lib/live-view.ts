@@ -89,6 +89,11 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
     message: "The device's capture ended.",
     again: "now",
   },
+  preempted_by_recording: {
+    message:
+      "A recording on this device's host needed the capture slot this view was using.",
+    again: "later",
+  },
   capture_failed: {
     message: "The device's screen capture failed. It is not retried by itself.",
     again: "later",
@@ -114,6 +119,11 @@ const endings: Record<string, Omit<LiveEnding, "reason">> = {
     message:
       "An earlier capture of this device is still being cleaned up. Try again shortly.",
     again: "later",
+  },
+  capture_cleanup_unproven: {
+    message:
+      "An earlier capture of this device was never confirmed stopped. Its screen cannot be captured until the device is stopped or an administrator resolves that.",
+    again: "no",
   },
   live_view_limit: {
     message:

@@ -1354,9 +1354,13 @@ message followed by exactly `bytes` bytes in binary messages of at most 64 KiB:
 `sequence` counts the fragments of the epoch from zero. A viewer's first media
 segment of an epoch is always a key frame segment, so a viewer that joins later
 starts at the most recent key frame the runner still holds, or else at the next
-one. A viewer that cannot keep up is not disconnected: the runner drops its backlog
-of more than 4 MiB and continues at a key frame, which shows as a gap in `sequence`.
-The first segment after any gap is a key frame segment. A new epoch starts with a new
+one. A viewer that reads slowly is not disconnected for that: the runner drops its
+backlog of more than 4 MiB and continues at a key frame, which shows as a gap in
+`sequence`. The first segment after any gap is a key frame segment. A viewer that
+stops reading is disconnected: once a write towards it, by the broker or by the
+runner, has been blocked for 30 seconds, its session closes like any other broker
+session and the view ends as `disconnected`. Each viewer has its own queue, so the
+device's other viewers are not held back meanwhile. A new epoch starts with a new
 `init`, and a consumer restarts its decoder with it. A browser page appends it to
 the `SourceBuffer` it already has; the dashboard's screen wall does so, and Chromium
 accepts it for fixture segments. No native stream has been tried.
@@ -1443,15 +1447,43 @@ a recording of one device therefore coexist as follows.
   has no provable capture state: the views end with `capture_unavailable`, and the
   live capture, which ran nothing unproven itself, is reported clean.
 - An ended session of either kind without positive cleanup refuses a new live
-  view (409 `capture_cleanup_pending`, retryable) and a new recording (409) of that
-  device, as an unclean recording already refused another recording.
+  view of that device, and an ended live capture without it refuses a new
+  recording. Both refusals are a 409 whose code says whether waiting can help:
+  - `capture_cleanup_pending` (retryable) while the runner may still report the
+    stop. That is until the ended session's deadline: a minute after a live capture
+    ended, and for a recording a minute after its requested duration would have
+    run out.
+  - `capture_cleanup_unproven` (not retryable) after that deadline, or once an
+    administrator abandoned the session. Waiting no longer helps. A late receipt
+    from the runner still clears it; otherwise only the device's observed stop (an
+    owned Android live capture whose encoder exit was confirmed), the lease's own
+    cleanup or the machine's deletion does.
+
+  A recording beside another recording of the device that is running or not proven
+  clean keeps its earlier answer, a plain 409.
 
 ### Endings
 
-A live view ends with its authority within about a second: the broker rechecks
-every view on each relayed message and every 250 ms, and the runner evaluates its
-own assignment and lease authority at most 250 ms apart. Leased captures also keep
-the recording path's native check of the lease supervisor about once a second.
+A live view ends with its authority. The broker rechecks every view on each
+relayed message and every 250 ms, and the runner evaluates its own assignment and
+lease authority at most 250 ms apart. What is asserted, on fixtures:
+
+- **An ending the controller decides or is told of.** No segment reaches the
+  viewer later than **one second** after the controller answered the request that
+  ended the authority (a release, a key rotation, a credential revocation, a device
+  stop, a close of the view or of its capture), or after a deadline (a lease's
+  `expiresAt`, an unrenewed view's `authorizationDeadline`).
+- **A loss nobody reports.** A leased capture keeps the recording path's native
+  check of the lease supervisor, about once a second. No segment reaches the
+  viewer later than **2.5 seconds** after a supervisor was killed. The fixture
+  host polls every 0.25 seconds, so its lease guard usually reports the loss
+  before that check finds it; a host on the default five-second poll relies on
+  the check.
+
+These bounds are measured under normal load on loopback with stand-in devices.
+They can be exceeded if the event loop is starved. Native timing remains unmeasured.
+A viewer on a slow link can still receive data already in flight. The end reason
+can settle up to three seconds after the stream stops, as described below.
 
 The controller records why a view ended in `endReason`:
 
@@ -1467,7 +1499,8 @@ The controller records why a view ended in `endReason`:
 | `device_stopped` | The device is no longer wanted or observed running, or was deleted |
 | `host_unavailable` | The host is disabled, stale or re-enrolled, or the assignment changed |
 | `capture_ended` | The shared capture ended: closed as a video session, or the runner reported it finished |
-| `disconnected` | A peer's socket dropped and the controller found no other cause |
+| `preempted_by_recording` | A recording on the same host needed a capture slot or capacity, and this view's capture was the oldest live capture there; see [a live view beside a recording](#a-live-view-beside-a-recording). Open a new view when a slot is free |
+| `disconnected` | A peer's socket dropped and the controller found no other cause. This includes a write to the viewer that stayed blocked for 30 seconds |
 | `controller_restarted` | The controller restarted; all sessions end |
 
 The host can also end a stream it is still serving, in-band, with `{type:"end"}`
@@ -1526,14 +1559,31 @@ by the recording path's rules. A wedged encoder never frees capacity.
   `POST /v1/machines/{machine}/video-sessions/{captureId}/abandon`, at least a
   minute after the capture ended. For an owned Android device whose encoder exit
   was confirmed, stopping the device settles it instead.
+- **A viewer that leaves early.** A run that is still being opened when its last
+  viewer leaves is clean at once if the provider refused before it spawned
+  anything, which the provider states explicitly. Once the recorder may have been
+  spawned, the runner stops that exact recorder and proves it, as for any early
+  end. Only an opening whose outcome the provider cannot state stays unknown.
 - A graceful runner shutdown stops active live captures first, while the runner can
-  still prove each recorder stopped. An idle live hub stops immediately. A runner
-  that is killed during a capture leaves its cleanup unknown.
+  still prove each recorder stopped, and reports them; their viewers read
+  `capture_ended` from the host. An idle live hub stops immediately. A view that
+  arrives while the runner stops is not taken: the runner neither journals nor
+  attaches for it, so its capture never had a host attached and the controller
+  releases it by itself when the view ends, at the latest by `attach_timeout`. A
+  runner that is killed during a capture leaves its cleanup unknown.
 
 Machine deletion is refused while the device's live capture is live or uncleaned,
 as for recordings. `GET .../video-sessions/{captureId}` shows the capture with
 `kind: "live"`, `cleaned` and `hostCleaned`; closing it there ends every view of
 the device.
+
+A lease's live capture is a video session of the lease's machine, like a lease
+recording. An administrator can therefore read that metadata, close the capture
+and, after its deadline, abandon it through
+`/v1/machines/{machine}/video-sessions/{captureId}`. Closing it ends the lease
+holder's views with `capture_ended`. That route carries no stream and returns no
+picture: an administrator can end a lease's views, never watch them. The lease key
+reads the same session through `/v1/leases/{lease}/video-sessions/{captureId}`.
 
 ### Input beside the stream
 
@@ -1602,8 +1652,11 @@ The native trial covered one Android lease and one viewer. Open:
   process): the runner shares one evaluation per device per 250 ms, measured on
   fixtures only.
 - Rotation during a view, and iOS as described above.
-- Runner or controller loss during a live view is not covered, as for lease
-  recordings.
+- A runner that is killed, or a controller that is lost, during a live view is
+  not covered, as for lease recordings. A graceful runner stop is covered on
+  fixtures.
+- How soon a stream stops after its authority ended, on a real host and network.
+  The bounds in [endings](#endings) are fixture measurements.
 
 ### Verification of live views
 
@@ -1612,26 +1665,46 @@ The native trial covered one Android lease and one viewer. Open:
   supervisor and SDK; stand-in adb, emulator and encoder). It covers ordered
   segments through a lease key; two viewers on one capture; capture stopping with
   the last viewer; refusal of the application key, the operator and another
-  lease's key; the per-device viewer limit; input beside the stream; renewal,
-  expiry of an unrenewed view and close; the stream ending at lease expiry, key
-  rotation, release and supervisor loss, each with its reservation released only on
-  proof; a wedged encoder held until abandonment; a recording before and during a
-  view with never more than one recorder on the device; epoch rollover; and the
-  application's resource limits.
+  lease's key; an administrator reading and closing the capture as a video session
+  without any stream; the per-device viewer limit; input beside the stream;
+  renewal, expiry of an unrenewed view and close; the stream ending at lease
+  expiry, key rotation, release and supervisor loss, each within the bound in
+  [endings](#endings) and with its reservation released only on proof; a wedged
+  encoder held until abandonment, refusing a view and a recording alike; a
+  recording before and during a view with never more than one recorder on the
+  device; epoch rollover; and the application's resource limits.
+- [mobile-live-android.test.ts](../coordination/test/control/mobile-live-android.test.ts)
+  uses the same harness for the points where the real Android provider decides a
+  capture's cleanup. A viewer leaves while the first run is being opened (during
+  the preflight and around the recorder's spawn, with a slowed stand-in adb),
+  before its second and third segment, and while the next run opens after a
+  rollover; each time the runner reports positive cleanup and the device can be
+  watched again. An account-owned device is stopped while watched, with a guest
+  that no longer answers the recorder probe and an emulator that takes two seconds
+  to exit: the capture stays held while the provider reports `stopping` and is
+  released only after the process is gone.
 - [mobile-live-owned.test.ts](../coordination/test/control/mobile-live-owned.test.ts)
   uses a device-free provider behind a real controller, broker, runner, dashboard
   gateway and SDK. It covers the owner, an administrator and a non-owner; viewer
-  and host slot limits shared with recordings; a device stop and the Android
-  settlement rule; token revocation; an unprovable iOS stop; the iOS opt-in; a
-  recording beside a view; and the gateway relay with in-band renewal.
+  and host slot limits shared with recordings, with a recording ending the oldest
+  live capture when no slot is free; a device stop and the Android settlement
+  rule, on a stand-in device that reports `stopping` until its process has exited;
+  token revocation; one of two viewers losing its authority, or being closed,
+  while the other keeps the same run without a gap; a runner that stops while one
+  device is watched and a view of another arrives; an unprovable iOS stop; the iOS
+  opt-in; a recording beside a view; and the gateway relay with in-band renewal.
 - [mobile-live-views.test.ts](../coordination/test/control/mobile-live-views.test.ts)
   runs the controller module on real SQLite with an injected clock: the lifetime
   from readiness, renewal and expiry, the attach timeout, retention of an ended
   view, a draining host, the three-second window for a dropped socket's cause, the
-  viewer and row limits, recordings beside live captures, and a controller restart.
+  viewer and row limits, recordings beside live captures, the two refusal codes
+  beside an unproven capture for a view and a recording, and a controller restart.
 - [mobile-live.test.ts](../coordination/test/control/mobile-live.test.ts) covers
   the segmenter, key frame detection, the wire contract against the packaged
-  schema and OpenAPI document, and the runner hub in isolation.
+  schema and OpenAPI document, and the runner hub in isolation, including the
+  4 MiB limit of a slow viewer's backlog and a hub that refuses a view while it
+  stops. No test holds a viewer's socket blocked for 30 seconds; that close is the
+  session connection's own, shared with every broker session.
 
 The stand-in encoder emits real MP4 box structure around opaque payloads. These
 tests prove authority, sharing, ordering, limits and accounting. They do not prove

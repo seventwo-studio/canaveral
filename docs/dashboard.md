@@ -783,8 +783,12 @@ Send JSON mutations with the dashboard session cookie and matching Origin.
 Refusals a page should expect when opening: 404 for a device of another account,
 409 for a leased or stopped device or a host without capacity for the capture, 409
 `capture_cleanup_pending` (retryable) while an earlier capture of the device is
-still being cleaned up, 409 `capability_unsupported` for a device that is not
-mobile, and 429 (`live_view_limit`, or all four video sessions of the host held).
+still being cleaned up, 409 `capture_cleanup_unproven` (not retryable) once that
+cleanup was not reported within a minute or was abandoned, 409
+`capability_unsupported` for a device that is not mobile, and 429
+(`live_view_limit`, or all four video sessions of the host held). A view that a
+recording displaced from the host's capture slots ends with
+`preempted_by_recording`; the page offers to open it again later.
 A leased device is never shown here: its screen belongs to its lease holder.
 
 The gateway relays the WebSocket exactly as it relays the

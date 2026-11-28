@@ -17,7 +17,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'coordination');
-export const TIMED = ['lease-tunnels', 'mobile-live-leases', 'mobile-live', 'requests-visibility', 'android-warm-pool'].map(name => `dist/test/control/${name}.test.js`);
+export const TIMED = ['lease-tunnels', 'mobile-live-leases', 'mobile-live', 'mobile-live-android', 'mobile-live-owned',
+  'requests-visibility', 'android-warm-pool'].map(name => `dist/test/control/${name}.test.js`);
 const fail = message => { console.error(message); process.exit(2); };
 
 const args = process.argv.slice(2), choice = args.find(arg => arg.startsWith('--group='))?.slice('--group='.length) ?? 'all';

@@ -258,6 +258,27 @@ test("a socket that drops reads the controller's reason for the ending", async (
       state: "Paused",
     },
   ]);
+  // A recording that took the capture's slot: the view can be opened again once a slot is free.
+  const taken = await ready();
+  reply = (call) =>
+    creating(call)
+      ? receipt(call)
+      : {
+          id: taken.id,
+          machineId: machine,
+          state: "ended",
+          endReason: "preempted_by_recording",
+        };
+  taken.socket.close();
+  await settle();
+  expect(taken.seen.endings).toEqual([
+    {
+      reason: "preempted_by_recording",
+      message:
+        "A recording on this device's host needed the capture slot this view was using.",
+      again: "later",
+    },
+  ]);
   // The record cannot be read, for example after the credential ended: the drop itself is reported.
   const next = await ready();
   reply = (call) =>
@@ -285,6 +306,12 @@ test("refusals when opening are explained and attach nothing", async () => {
       409,
       "capture_cleanup_pending",
       { reason: "capture_cleanup_pending", again: "later" },
+    ],
+    // Waiting does not clear this one, so the page must not offer to try again.
+    [
+      409,
+      "capture_cleanup_unproven",
+      { reason: "capture_cleanup_unproven", again: "no" },
     ],
     [429, "live_view_limit", { reason: "live_view_limit", state: "Full" }],
     [429, "limit_exceeded", { reason: "limit_exceeded", state: "Full" }],

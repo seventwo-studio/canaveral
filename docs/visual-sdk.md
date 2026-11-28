@@ -188,8 +188,8 @@ to 120.
 The SDK checks this ordering and that each segment consists of exactly the expected
 boxes; a violation is a `session_protocol_error`. It does not decode video. Feed
 the segments in order to a fragmented-MP4 decoder. A browser `SourceBuffer` should
-accept them after the page reads the codec profile from the initialization segment;
-no browser has been tried. The stream
+accept them after the page reads the codec profile from the initialization segment.
+Chromium has played fixture segments. Native browser playback remains open. The stream
 identifies its codec family as `avc1`. Consuming a stream twice is rejected.
 
 The iterator waits without a time limit for the next segment, because Android
@@ -200,8 +200,8 @@ own request timeout. Pass `signal` to cancel.
 **Renewal.** A view lasts `ttlSeconds` and ends with `view_expired` unless renewed.
 With `autoRenew` (default `true`) the stream sends a renewal after every third of
 that lifetime, but only while the caller is waiting in the iterator: a consumer
-that stops pulling stops renewing, and the broker also drops a viewer that reads
-nothing for 30 seconds. `stream.renew()` renews explicitly when `autoRenew` is
+that stops pulling stops renewing. The session also closes if a write to the viewer
+stays blocked for 30 seconds. `stream.renew()` renews explicitly when `autoRenew` is
 `false`. `stream.authorizationDeadline` is the controller's latest answer. Renewal
 never renews, extends or releases a lease.
 
@@ -211,7 +211,7 @@ never renews, extends or releases a lease.
 | `source` | Meaning |
 | --- | --- |
 | `host` | The capturing host ended a stream it was still serving: `capture_failed`, `capture_unavailable` or `capture_ended` |
-| `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed` or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
+| `controller` | The stream dropped and the SDK read the view's recorded `endReason`, such as `lease_expired`, `lease_released`, `lease_failed`, `key_rotated`, `device_stopped`, `access_revoked`, `view_expired`, `closed`, `capture_ended`, `preempted_by_recording` (a recording on the host took the capture's slot; open a new view later) or `disconnected`. `credential_rejected` means the credential that opened the view can no longer read it (rotated or revoked) |
 | `client` | This client ended it: `closed` (`stream.close()`), `cancelled` (the signal) or `connection_lost`: the controller could not be reached, or the connection dropped and the controller recorded no cause. `ended.error` then holds the connection failure |
 
 A stream drops when the broker closes its sockets. A connection reset counts as a
