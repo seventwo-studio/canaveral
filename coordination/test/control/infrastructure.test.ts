@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SqliteStore } from "../../src/sqlite.ts";
-import { authenticateSetup, claimSetup, clusterResources, consolidateLocalRuntimes, createModule, healthReady, hostHealth, InfrastructureStore, inspectHost, podUsage, ProcessUsageCollector, quantity, recordHostImages, recordInfrastructure, validateCluster, validateHealth, validateSample } from "../../src/control/infrastructure.ts";
+import { authenticateSetup, claimSetup, consolidateLocalRuntimes, createModule, healthReady, hostHealth, InfrastructureStore, inspectHost, ProcessUsageCollector, recordHostImages, recordInfrastructure, validateHealth, validateSample } from "../../src/control/infrastructure.ts";
 import { legacyDigest, normalizeTemplate } from "../../src/control/templates.ts";
 import type { ControlRequest, Principal } from "../../src/control/contracts.ts";
 const capacity = { cpu: 8, memoryMiB: 8192, diskGiB: 100 }, size = { cpu: 2, memoryMiB: 1024, diskGiB: 8 };
@@ -135,57 +135,6 @@ test("infrastructure initialization preserves opaque legacy host rows without fa
   assert.deepEqual({ ...f.store.transaction(db => db.prepare("SELECT * FROM hosts WHERE id=?").get(legacy)!) }, original);
   assert.equal(f.store.transaction(db => db.prepare("SELECT 1 FROM host_limits WHERE host=?").get(legacy)), undefined);
 });
-const namespace = "guests", now = Date.parse("2026-11-03T00:01:00Z") / 1000;
-function inventory(name = "vm", names = ["guest"]): Record<string, any> { return { metadata: { name, namespace, creationTimestamp: "2026-11-03T00:00:00Z" }, spec: { containers: names.map(name => ({ name })) }, status: { phase: "Running" } }; }
-function metric(name = "vm", names = ["guest"], stamp: unknown = "2026-11-03T00:01:00Z"): Record<string, any> { return { metadata: { name, namespace }, timestamp: stamp, window: "30s", containers: names.map(name => ({ name, usage: { cpu: "100m", memory: "64Mi" } })) }; }
-test("namespace usage and quota quantities remain distinct from runner metrics and reservations", () => {
-  for (const [v, n] of [["250m", .25], ["10n", 1e-8], ["2Gi", 2147483648], ["1.5G", 1500000000], ["1e3", 1000]] as const) assert.equal(quantity(v), n);
-  for (const v of ["NaN", "Infinity", "-1", "1garbage", "1e999999999", "9007199254740993", "9007199254740992001m"]) assert.equal(quantity(v), null);
-  const report = clusterResources(namespace, now, [inventory("vm", ["guest", "helper"])], [metric("vm", ["guest", "helper"])], [{ metadata: { name: "pool" }, status: { hard: { "requests.cpu": "4", "requests.memory": "8Gi" }, used: { "requests.cpu": "500m", "requests.storage": "20Gi" } } }]);
-  const metrics = report.metrics as Record<string, unknown>;
-  assert.equal(metrics.cpuCores, .2); assert.equal(metrics.memoryMiB, 128);
-  assert.deepEqual(metrics.coverage, { status: "complete", activePods: 1, measuredPods: 1 });
-  assert.equal((report.quotas as any).items[0].used["requests.storage"], 20);
-  assert.equal(validateSample({ scope: "runner", domain: "worker", sampledAt: 1, cpuPercent: 5, cluster: report }).scope, "runner");
-  assert.deepEqual((report.canaveral as any).ownership, { status: "unavailable" });
-});
-test("all active workloads, regular containers and running sidecars are required for namespace totals", () => {
-  const missing = podUsage(namespace, now, [inventory(), inventory("other")], [metric()]);
-  assert.equal(missing.status, "unavailable"); assert.equal("cpuCores" in missing, false);
-  assert.deepEqual(missing.coverage, { status: "incomplete", activePods: 2, measuredPods: 1 });
-  for (const measurements of [[metric(), metric()], [metric("vm", [])], [metric("vm", ["guest", "guest"])], [metric("vm", ["helper"])]]) assert.equal(podUsage(namespace, now, [inventory()], measurements).status, "unavailable");
-  for (const section of ["initContainerStatuses", "ephemeralContainerStatuses"]) {
-    const pod = inventory(); pod.status[section] = [{ name: "extra", state: { running: {} } }];
-    assert.equal(podUsage(namespace, now, [pod], [metric()]).status, "unavailable");
-    assert.equal(podUsage(namespace, now, [pod], [metric("vm", ["guest", "extra"])]).status, "available");
-  }
-});
-test("stale, future and previous-incarnation measurements cannot become fresh namespace totals", () => {
-  for (const stamp of ["2026-11-02T23:58:59Z", "2026-11-03T00:01:06Z", null, "2026-11-03T00:01:00"]) assert.equal(podUsage(namespace, now, [inventory()], [metric("vm", ["guest"], stamp)]).status, "unavailable");
-  const replaced = inventory(); replaced.metadata.creationTimestamp = "2026-11-03T00:00:50Z";
-  assert.equal(podUsage(namespace, now, [replaced], [metric("vm", ["guest"], "2026-11-03T00:00:49Z")]).status, "unavailable");
-  const fresh = podUsage(namespace, now, [inventory()], [metric("vm", ["guest"], "2026-11-03T00:00:10Z")]);
-  assert.equal(fresh.sampledAt, now - 50);
-  assert.equal(podUsage(namespace, now, [replaced], [metric()], true).status, "unavailable");
-});
-test("successful empty namespace differs from denied or malformed inventory/metrics", () => {
-  assert.equal(podUsage(namespace, now, [], []).cpuCores, 0);
-  const stopped = inventory(); stopped.status.phase = "Succeeded"; assert.equal(podUsage(namespace, now, [stopped], []).podCount, 0);
-  for (const [pods, metrics] of [[{}, []], [[], {}], [false, false], [[inventory(), inventory()], [metric()]]]) assert.equal(podUsage(namespace, now, pods, metrics).status, "unavailable");
-  const invalid = metric(); invalid.containers[0].usage.cpu = "NaN";
-  assert.equal(podUsage(namespace, now, [inventory()], [invalid]).status, "unavailable");
-  const unknown = clusterResources(namespace, now, false, false, false);
-  assert.deepEqual(unknown.metrics, { status: "unavailable", coverage: { status: "unavailable" } });
-  assert.deepEqual(unknown.quotas, { status: "unavailable", items: [] });
-  assert.equal(JSON.stringify(unknown).includes("private"), false);
-});
-test("coverage validation rejects contradictory counts and available partial totals, retaining legacy reports", () => {
-  const complete = clusterResources(namespace, now, [inventory()], [metric()], []);
-  for (const coverage of [{ status: "complete", activePods: 2, measuredPods: 1 }, { status: "incomplete", activePods: 1, measuredPods: 1 }, { status: "complete", activePods: true, measuredPods: 1 }, { status: "unavailable" }, { status: "complete" }]) {
-    const value = structuredClone(complete); (value.metrics as any).coverage = coverage; assert.throws(() => validateCluster(value));
-  }
-  const legacy = structuredClone(complete); delete (legacy.metrics as any).coverage; delete (legacy.metrics as any).sampledAt; assert.doesNotThrow(() => validateCluster(legacy));
-});
 test("process usage de-duplicates owned/tree identities and handles PID reuse and failed verification as unknown", () => {
   const collector = new ProcessUsageCollector();
   const p = { pid: 99, birth: 1, name: "CanaveralVMRunner", userSeconds: 2, systemSeconds: 0, rssBytes: 1048576 };
@@ -269,4 +218,18 @@ test("mapped host resources include held runner reservations in category totals"
   const categories = report.categories as (typeof size & { id: string })[];
   assert.equal(categories.find(c => c.id === "physicalShared")!.cpu, size.cpu);
   for (const key of ["cpu", "memoryMiB", "diskGiB"] as const) assert.equal(categories.reduce((sum, c) => sum + c[key], 0), (report.reserved as typeof size)[key]);
+});
+
+test("native inference setup tokens have the same scoped single-claim and expiry rules as libvirt", t => {
+  const f = fixture(t), setupOffer = { ...offer(), provider: "native", templates: [] };
+  const issued = f.infrastructure.createSetup({ id: randomUUID(), ...setupOffer });
+  const token = String(issued.enrollmentToken);
+  assert.equal(issued.expiresAt, f.now() + 1800);
+  assert.throws(() => f.enroll(token, f.host, f.credential, offer()));
+  f.enroll(token, f.host, f.credential, setupOffer);
+  assert.throws(() => f.enroll(token, randomUUID(), f.credential, setupOffer));
+  f.tick(1801);
+  f.enroll(token, f.host, f.credential, setupOffer);
+  f.infrastructure.revokeSetup(String(issued.id));
+  assert.throws(() => f.enroll(token, f.host, f.credential, setupOffer));
 });

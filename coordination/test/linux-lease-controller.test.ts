@@ -27,7 +27,7 @@ const key = () => randomBytes(32).toString("base64url");
 const T0 = 1_800_000_000;
 const DIGEST = "sha256:" + "cd".repeat(32), OTHER_DIGEST = "sha256:" + "ef".repeat(32);
 const VM = { cpu: 4, memoryMiB: 8192, diskGiB: 20 };
-const IMAGE = { id: "linux-dev", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt", digest: DIGEST, resources: VM, capabilities: ["command", "files", "pty"] };
+const IMAGE = { id: "linux-dev", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization", digest: DIGEST, resources: VM, capabilities: ["command", "files", "pty"] };
 const APPLE = { ...IMAGE, id: "linux-dev-apple", arch: "arm64", backend: "appleVirtualization", digest: OTHER_DIGEST };
 const MODEL = "fixture-model:1", MODEL_DIGEST = "sha256:" + "ab".repeat(32);
 
@@ -190,19 +190,17 @@ test("catalog, grants and approvals pin headless Linux images per backend and de
   await f.ok(f.post("/v1/linux-lease-images", APPLE, f.admin));
 
   const domain = await f.domain({ cpu: 16, memoryMiB: 32768, diskGiB: 200 });
-  const [kube, apple] = [await f.enroll(), await f.enroll()];
-  // A binding serves one backend: an Apple Virtualization runner cannot serve a kubevirt image.
-  assert.equal((await f.approve(apple, domain, { ...APPLE, backend: "appleVirtualization", digest: DIGEST, id: IMAGE.id, arch: "amd64" })).status, 409);
-  assert.equal((await f.post("/v1/linux-lease-runner-approvals", { binding: kube.binding, domainId: domain, backend: "kubevirt", images: [{ id: IMAGE.id, revision: "1", arch: "amd64", digest: OTHER_DIGEST }] }, f.admin)).status, 404);
+  const [runner, apple] = [await f.enroll(), await f.enroll()];
+  assert.equal((await f.approve(apple, domain, { ...IMAGE, digest: OTHER_DIGEST })).status, 404);
   assert.equal((await f.approve(apple, domain, APPLE)).status, 200);
 
-  // Catalogue: granted image visible but unavailable until a kubevirt binding serves it.
+  // Catalogue: granted image visible but unavailable until a runner is approved for the exact image.
   let catalogue = await a.client().catalogue();
-  assert.deepEqual(catalogue.templates.map(i => [i.id, i.available, i.runtime, i.mode, i.capabilities.displayStream, i.capabilities.pty]), [[IMAGE.id, false, "kubevirt", "headless", false, true]]);
+  assert.deepEqual(catalogue.templates.map(i => [i.id, i.available, i.runtime, i.mode, i.capabilities.displayStream, i.capabilities.pty]), [[IMAGE.id, false, "apple", "headless", false, true]]);
   assert.equal((await b.client().catalogue()).templates.length, 0);
   await rejectsWith(a.client().acquireLease(f.acquire()), 503, "capacity_unavailable");
-  assert.equal((await f.approve(kube, domain)).status, 200);
-  assert.equal((await f.approve(kube, domain)).status, 200);
+  assert.equal((await f.approve(runner, domain)).status, 200);
+  assert.equal((await f.approve(runner, domain)).status, 200);
   catalogue = await a.client().catalogue();
   assert.equal(catalogue.templates[0]!.available, true);
   assert.equal(catalogue.limits.maxLifetimeSeconds, 300);
@@ -213,19 +211,19 @@ test("catalog, grants and approvals pin headless Linux images per backend and de
   await rejectsWith(a.client().acquireLease(f.acquire({ ttlSeconds: 301 })), 400);
   assert.equal((await f.inspectDomain(domain)).reservations, 0);
 
-  const kubeLease = await a.client().acquireLease(f.acquire({ requiredCapabilities: ["command", "files"] }));
-  assert.equal(kubeLease.lease.capabilities.displayStream, false);
-  const assignment = (await f.claim(kube)).assignment!;
-  assert.deepEqual([assignment.image.backend, assignment.image.digest, assignment.leaseId], ["kubevirt", DIGEST, kubeLease.lease.id]);
+  const leaseResult = await a.client().acquireLease(f.acquire({ requiredCapabilities: ["command", "files"] }));
+  assert.equal(leaseResult.lease.capabilities.displayStream, false);
+  const assignment = (await f.claim(runner)).assignment!;
+  assert.deepEqual([assignment.image.backend, assignment.image.digest, assignment.leaseId], ["appleVirtualization", DIGEST, leaseResult.lease.id]);
   assert.equal((await f.claim(apple)).assignment, null);
-  assert.equal((await f.report(kube, assignment.id, 1, f.receipt(assignment, { imageDigest: OTHER_DIGEST }))).body.code, "image_mismatch");
-  assert.equal((await f.report(kube, assignment.id, 1, f.receipt(assignment, { backend: "appleVirtualization" }))).status, 409);
+  assert.equal((await f.report(runner, assignment.id, 1, f.receipt(assignment, { imageDigest: OTHER_DIGEST }))).body.code, "image_mismatch");
+  assert.equal((await f.report(runner, assignment.id, 1, f.receipt(assignment, { backend: "libvirt" }))).status, 400);
   // Graphics cannot be reported ready on a headless lease; readiness needs explicit capability evidence.
-  assert.equal((await f.report(kube, assignment.id, 1, f.receipt(assignment, { ready: { command: true, pty: false, files: false } }))).status, 409);
-  await f.ok(f.report(kube, assignment.id, 1, f.receipt(assignment, { runtimeState: "running", ready: { command: true, pty: false, files: false } })));
-  assert.equal((await a.client().inspectLease(kubeLease.lease.id)).state, "provisioning");
-  await f.ok(f.report(kube, assignment.id, 2, f.receipt(assignment, f.running)));
-  const ready = await a.client().inspectLease(kubeLease.lease.id);
+  assert.equal((await f.report(runner, assignment.id, 1, f.receipt(assignment, { ready: { command: true, pty: false, files: false } }))).status, 409);
+  await f.ok(f.report(runner, assignment.id, 1, f.receipt(assignment, { runtimeState: "running", ready: { command: true, pty: false, files: false } })));
+  assert.equal((await a.client().inspectLease(leaseResult.lease.id)).state, "provisioning");
+  await f.ok(f.report(runner, assignment.id, 2, f.receipt(assignment, f.running)));
+  const ready = await a.client().inspectLease(leaseResult.lease.id);
   assert.deepEqual([ready.state, ready.runtimeState, ready.revision, ready.members[0]!.ready], ["ready", "running", 2, true]);
   // Lifecycle stays ready, but the current member signal follows fresh capability evidence.
   const unready = { command: false, pty: false, files: false };
@@ -236,8 +234,8 @@ test("catalog, grants and approvals pin headless Linux images per backend and de
     [6, "running", unready, false],
     [7, "running", f.running.ready, true],
   ] as const) {
-    await f.ok(f.report(kube, assignment.id, sequence, f.receipt(assignment, { runtimeState, ready: capabilityReady })));
-    const current = await a.client().inspectLease(kubeLease.lease.id);
+    await f.ok(f.report(runner, assignment.id, sequence, f.receipt(assignment, { runtimeState, ready: capabilityReady })));
+    const current = await a.client().inspectLease(leaseResult.lease.id);
     assert.deepEqual([current.state, current.runtimeState, current.revision, current.members[0]!.ready],
       ["ready", runtimeState, 2, expectedReady]);
   }
@@ -615,4 +613,33 @@ test("additive failure-reason migration preserves existing lease and reservation
   assert.equal((await app.client().inspectLease(lease.id)).state, 'provisioning');
   assert.equal((await f.inspectDomain(domain)).reservations, 1);
   assert.equal(f.rows('SELECT failure_reason FROM linux_leases')[0]!.failure_reason, null);
+});
+
+test("retired Linux backend assignments remain reserved but are withheld after restart", async t => {
+  const f = await fixture(t), app = await f.application(), runner = await f.enroll(), domain = await f.domain(VM);
+  await f.grant(app.id);
+  await f.ok(f.approve(runner, domain));
+  const { lease } = await app.client().acquireLease(f.acquire());
+  const claimId = randomUUID(), assignment = (await f.claim(runner, claimId)).assignment!;
+  await f.ok(f.report(runner, assignment.id, 1, f.receipt(assignment, f.running)));
+  const retiredBackend = "kubevirt";
+  await f.restart(() => {
+    const db = new DatabaseSync(f.statePath);
+    try {
+      for (const table of ["linux_lease_images", "linux_lease_runner_approvals", "linux_leases"]) {
+        db.prepare(`UPDATE ${table} SET backend=?`).run(retiredBackend);
+      }
+    } finally { db.close(); }
+  });
+  const current = await app.client().inspectLease(lease.id);
+  assert.deepEqual([current.state, current.runtimeState, current.cleanup.state], ["failed", "unknown", "pending"]);
+  assert.equal(current.members[0]!.ready, false);
+  assert.equal((await app.client().catalogue()).templates.length, 0);
+  await rejectsWith(app.client().acquireLease(f.acquire()), 403);
+  assert.equal((await f.claim(runner)).status, 403);
+  assert.equal((await f.claim(runner, claimId)).status, 409);
+  const listed = await f.ok(f.post("/v1/runners/linux-leases/assignments", { binding: runner.binding }, runner.credential));
+  assert.deepEqual(listed.assignments, []);
+  assert.equal((await f.inspectDomain(domain)).reservations, 1);
+  assert.equal(f.rows("SELECT backend FROM linux_leases")[0]!.backend, retiredBackend);
 });

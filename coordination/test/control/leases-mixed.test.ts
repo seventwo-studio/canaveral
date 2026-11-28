@@ -7,7 +7,7 @@ import { failure, key, leaseFixture } from "./leases-fixture.test.ts";
 
 function mixedFixture(t: Parameters<typeof leaseFixture>[0]) {
   const f = leaseFixture(t), linux = f.leases.linux, domains = new ResourceDomains();
-  const image = { id: "linux-slice", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt", digest: "sha256:" + "cd".repeat(32),
+  const image = { id: "linux-slice", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization", digest: "sha256:" + "cd".repeat(32),
     resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, capabilities: ["command", "files", "pty"] };
   linux.image(image);
   const domain = randomUUID();
@@ -102,7 +102,7 @@ test("mixed catalogues include both permitted namespaces and overlapping images 
   const catalogue = await f.request("GET", "/v1/environments/templates");
   assert.deepEqual(catalogue.templates.map((image: any) => image.id), [f.image.id, "linux-slice"]);
   // Installed generic inventory for another application's image does not mask a Linux-only grant.
-  const overlapping = { id: f.image.id, revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt", digest: "sha256:" + "ef".repeat(32),
+  const overlapping = { id: f.image.id, revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization", digest: "sha256:" + "ef".repeat(32),
     resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, capabilities: ["command"] };
   f.linux.image(overlapping);
   const linuxOnly = f.application({}, []);

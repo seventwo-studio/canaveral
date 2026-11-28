@@ -1,0 +1,97 @@
+{
+  "schema": "canaveral-runtime-qualification-record",
+  "version": 1,
+  "kind": "service",
+  "backend": "canaverald",
+  "identity": {
+    "manager": "systemd",
+    "node": "v24.11.0",
+    "account": "dedicated system account"
+  },
+  "scope": {
+    "os": "linux",
+    "arch": "aarch64",
+    "acceleration": "none",
+    "executionMode": "service"
+  },
+  "outcome": "passed",
+  "blockers": [],
+  "evidence": {
+    "steps": [
+      {
+        "name": "start loopback controller and mint credentials",
+        "outcome": "passed",
+        "durationMs": 375
+      },
+      {
+        "name": "install service definition",
+        "outcome": "passed",
+        "durationMs": 919
+      },
+      {
+        "name": "start, enroll, and receive healthy offer",
+        "outcome": "passed",
+        "durationMs": 579
+      },
+      {
+        "name": "advance heartbeat under the service account",
+        "outcome": "passed",
+        "durationMs": 280
+      },
+      {
+        "name": "run inventory and runtime status with the service config and state",
+        "outcome": "passed",
+        "durationMs": 5290
+      },
+      {
+        "name": "restart without the enrollment credential",
+        "outcome": "passed",
+        "durationMs": 6153
+      },
+      {
+        "name": "stop cleanly and reacquire the state lock",
+        "outcome": "passed",
+        "durationMs": 5162
+      },
+      {
+        "name": "uninstall and verify service registration is gone",
+        "outcome": "passed",
+        "durationMs": 691
+      }
+    ],
+    "observations": {}
+  },
+  "source": {
+    "repository": "seventwo-studio/canaveral",
+    "workflow": ".github/workflows/daemon-acceptance.yaml",
+    "workflowName": "canaverald service acceptance",
+    "runId": 45231181144,
+    "runAttempt": 1,
+    "runUrl": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181144",
+    "event": "push",
+    "ref": "refs/heads/feat/runtime-acceptance",
+    "commit": "65e28f4318238f8c8fe77419cdd35bd7d3cd2184",
+    "job": {
+      "id": 137890814482,
+      "name": "service (ubuntu-24.04-arm)",
+      "conclusion": "success",
+      "url": "https://github.com/seventwo-studio/canaveral/actions/runs/45231181144/job/137890814482"
+    },
+    "artifact": {
+      "id": 14847830792,
+      "name": "canaverald-ubuntu-24.04-arm",
+      "digest": "sha256:a5cce9340e3a13cd235586665e2931d06741766f25e5d70d106bfe96a160db47"
+    },
+    "evidenceSha256": "b9c04a821d603742f0880872224ae276c612c4bb0e0c88d9e49ba665f0a0e845"
+  },
+  "runner": {
+    "label": "ubuntu-24.04-arm",
+    "imageOS": "ubuntu24-arm64",
+    "imageVersion": "20261116.188.1"
+  },
+  "limitations": [
+    "Ran on a disposable GitHub-hosted ubuntu-24.04-arm runner (ubuntu24-arm64 20261116.188.1), not a production host.",
+    "The daemon enrolled with a loopback controller started by the test."
+  ],
+  "recorded": "2026-11-23"
+}

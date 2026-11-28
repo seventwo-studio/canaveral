@@ -63,7 +63,7 @@ test("a waiting Linux lease on a mapped host takes one warm device's capacity; o
   const applicationId = randomUUID(), domainId = randomUUID(), digest = "sha256:" + "ab".repeat(32), HOST = { cpu: 4, memoryMiB: 4096, diskGiB: 16 };
   const app = (await ok("/v1/consumers", { id: applicationId, name: "runner-agents", templates: [],
     limits: { resources: { cpu: 64, memoryMiB: 131072, diskGiB: 1000 }, activeLeases: 4, defaultTTLSeconds: 60, maxTTLSeconds: 300, maxLifetimeSeconds: 300, provisioningTimeoutSeconds: 250 } })).credential as string;
-  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "kubevirt", digest, resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, capabilities: ["command"] };
+  const image = { id: "runner-linux", revision: "1", arch: "amd64", os: "linux", mode: "headless", backend: "appleVirtualization", digest, resources: { cpu: 1, memoryMiB: 1024, diskGiB: 4 }, capabilities: ["command"] };
   await ok("/v1/linux-lease-images", image);
   await ok("/v1/linux-lease-grants", { applicationId, imageId: image.id, revision: "1", arch: "amd64", digest });
   await ok("/v1/resource-domains", { id: domainId, name: "android host", capacity: HOST });
@@ -71,7 +71,7 @@ test("a waiting Linux lease on a mapped host takes one warm device's capacity; o
   const binding = { controllerId: "8a4d2f3e-5a7b-4c1d-9e2f-0123456789ab", runnerId: randomUUID(), generation: 1, incarnationId: randomUUID() }, enrollment = randomUUID();
   const issued = await ok("/v1/runner-enrollments", { id: enrollment, ...binding, ttlSeconds: 60 });
   await ok("/v1/runner-enrollments/consume", { id: enrollment, ...binding, credential: key() }, issued.enrollmentToken as string);
-  await ok("/v1/linux-lease-runner-approvals", { binding, domainId, backend: "kubevirt", images: [{ id: image.id, revision: "1", arch: "amd64", digest }] });
+  await ok("/v1/linux-lease-runner-approvals", { binding, domainId, backend: "appleVirtualization", images: [{ id: image.id, revision: "1", arch: "amd64", digest }] });
   await configurePool(h, [warmTarget(2)]);
   const original = await warmReady(h, 2, "lease-phone", 60000);
   const budget = async (): Promise<any> => (await h.api("GET", `/v1/resource-domains/${domainId}`)).body;

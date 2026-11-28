@@ -1,20 +1,17 @@
 # Infrastructure setup, health and resources
 
-Accepted local implementation, 2026-11-02. A direct host provides VMs or
-simulators on its own machine. An external orchestrator provides a bounded pool;
-KubeVirt is the first adapter. Existing KubeVirt identities appear as
-`kind: orchestrator` without re-enrollment, changed ownership or a second capacity
-ledger. The central Canaveral controller is distinct from these connections.
+A host provides VMs or simulators through canaverald and connects outbound to the controller.
 
 ## Connect a runner
 
-Open **Hosts → Add host** or **Orchestrators → Add orchestrator**. Select the
-host operating system and enabled runtimes (or external orchestrator provider),
+This is the existing-host helper flow. See [host installation paths](host-installation-paths.md)
+for the planned Canaveral OS installer and update ownership.
+
+Open **Hosts → Add host**. Select the host operating system and enabled runtimes,
 name, controller origin reachable from that runner and its Canaveral
 host limits. Configure storage and provider bindings using the form;
 advanced configuration holds installed image definitions and other bindings.
-Kubernetes context credentials remain in the runner's kubeconfig. An empty image
-catalogue is allowed during onboarding; it cannot receive machine placements.
+An empty image catalogue is allowed during onboarding; it cannot receive machine placements.
 
 Create and download the private `canaveral-setup.json` file. It contains a
 30-minute enrollment credential bound to the configured name, provider and
@@ -28,8 +25,8 @@ shell command arguments. Protect the downloaded file on disk and during transfer
 Install Canaveral and the selected backend on the target machine, then run:
 
 ```sh
-canaveral host --setup-file ./canaveral-setup.json --state ./state/runner --check
-canaveral host --setup-file ./canaveral-setup.json --state ./state/runner
+canaverald --setup-file ./canaveral-setup.json --state ./state/runner --check
+canaverald --setup-file ./canaveral-setup.json --state ./state/runner
 ```
 
 The check command exits nonzero on failures; it does not enroll or create VMs.
@@ -46,7 +43,7 @@ state directory. Preserve the identity across restarts; never clone/share its
 state with another runner. For later starts, use the existing controller origin:
 
 ```sh
-canaveral --url https://controller.example.com host \
+canaverald --url https://controller.example.com \
   --config ./state/runner/host-config.json --state ./state/runner
 ```
 
@@ -59,19 +56,39 @@ operator-managed enrollment files remain compatible.
 
 ## Capabilities and environment checks
 
+`canaverald` runs as a separate host process. It owns local runtime checks and
+execution for the configured VM, mobile and inference adapters. The controller
+assigns work through the runner's outbound connection.
+
+Run `canaverald --setup-file ./canaveral-setup.json --state ./state/runner --inventory`
+to print a versioned JSON inventory. It includes CPU and memory, free space on
+the state filesystem, installed image definitions, the configured workload offer
+and runtime check results.
+
+The [host runtime registry](host-runtimes.md) adds local backend status. Run
+`canaverald runtimes status --config FILE --state DIR` for this section alone.
+
+The inventory uses
+the same provider probes as `--check` and can run without a controller connection
+or enrollment. Capacity and workload offers come
+from operator configuration. Local hardware readings and passing prerequisite
+checks do not grant placement or establish native acceptance.
+
+
 Runners check platform/architecture, writable storage, executable availability
 and available versions, offered CPU/memory capacity against the local machine,
 storage headroom, backend access and image bindings. Reports contain bounded,
 structured checks with passed/warning/failed/skipped status and repair guidance.
-Raw SDK stderr, environment variables, kubeconfig and credentials are not sent.
+Raw SDK stderr, environment variables and credentials are not sent.
 Provider adapters perform their existing ownership and runtime/image validation.
 
-Libvirt checks separately report a configured Linux deadline library's static
-ELF/architecture/function-export validation and the still-unverified native lease
-behavior. Inspection never loads the library. Missing configuration warns;
-configured invalid artifacts fail with fixed repair guidance and no private paths.
-`libvirtLeaseArtifact` means the artifact inspection passed; it grants no consumer
-lease eligibility or native execution guarantee. Native expiry, cleanup, restart
+Libvirt lease eligibility comes from the pinned lease helper (`leaseHelper` and
+`leaseHelperSha256`) and the kernel's peer pidfd support, as described in
+[libvirt lease supervision](libvirt-supervision.md#helper-identity);
+`canaverald runtimes status` reports it. There is no separate deadline library to
+configure. The health report's `libvirt-lease-artifact` check predates the helper,
+receives no evidence and therefore only warns; it grants no consumer lease
+eligibility or native execution guarantee. Native expiry, cleanup, restart
 and isolation retain their separate acceptance gate.
 
 Checks run independently of heartbeats every 60 seconds. **Run checks** queues an
@@ -105,7 +122,7 @@ Windows/macOS guest access are not inferred from backend availability.
 The dashboard separates host limits, reservations and observed usage:
 
 - **Host limits:** controller-owned CPU, memory and logical disk limits on what
-  Canaveral may allocate to this host or pool. Initial limits come from the
+  Canaveral may allocate to this host. Initial limits come from the
   enrollment capacity; administrators can edit them in the host overview. Each
   resource must fit both its saved limit and the current runner offer. Neither
   value automatically discovers allocatable cluster capacity.
@@ -123,8 +140,8 @@ The dashboard separates host limits, reservations and observed usage:
   removal. A stored [device baseline](warm-pool-and-baselines.md#what-is-stored) charges
   its host's disk, and a save in progress holds twice the device's data size plus 2 GiB.
 - **Observed usage:** host-wide CPU busy percentage, total/available memory and
-  total/free storage on the configured storage filesystem, collected with
-  [psutil](https://psutil.io/). Other applications are included; the first CPU
+  total/free storage on the configured storage filesystem, sampled through Node's
+  `os` and filesystem (`statfs`) APIs; no extra package is needed. Other applications are included; the first CPU
   reading or denied/unsupported metrics are unavailable, not invented zeroes.
 
 Samples are collected every five seconds and persisted at most once per ten
@@ -282,41 +299,13 @@ have been removed. Existing database rows are left inert; they no longer affect
 admission. Existing hosts seed their limits once from their last advertised
 capacity when the controller opens the database. Do not advertise the same
 physical capacity under multiple identities: each host's limits are independent,
-and there is no combined limit across hosts or overlapping pools. The explicit
+and there is no combined limit across hosts. The explicit
 host-to-runner-domain mapping below shares a budget across the two controller
-paths for one machine; it does not support overlapping pools.
+paths for one machine.
 
 Direct runners on the same physical machine report the same opaque resource
 domain. Their observed usage must not be summed. The domain is a discovery hint,
-not additional capacity or an automatic grouping rule. KubeVirt measurements have
-`scope: runner`: they describe the worker machine/container, never cluster node
-utilization. The KubeVirt runner additionally reads namespace pod CPU/memory from the metrics
-API and namespace ResourceQuota hard/used values. These include all namespace
-workloads and remain distinct from worker metrics and Canaveral reservations.
-Missing metrics-server or read permissions report unavailable values, not zero.
-The collector also reads namespace pod inventory. A namespace CPU/memory total
-requires fresh measurements for every inventory-observed active pod and its
-regular containers, plus running init sidecars and ephemeral containers. Finished
-pods are excluded. Missing inventory permission, missing or duplicate pod/container
-measurements, invalid quantities and stale timestamps withhold totals. Measurements
-must end within 120 seconds of collection, at most five seconds in the future,
-and after the pod's recorded creation time; previous same-name pod readings cannot
-satisfy coverage. A measured empty namespace is zero only when both inventory and
-metrics reads succeed. Reports expose coverage counts and the oldest underlying
-measurement time, separately from collection time. Older reports without coverage
-remain compatible and do not establish this check.
-
-Inventory and metrics are separate API reads, not an atomic cluster snapshot.
-Concurrent pod churn can change membership between them. These are namespace-wide
-measurements, including workloads outside Canaveral; labels do not prove assignment
-ownership or authorize changing reservations. The optional [assigned VM pod report](kubevirt-resource-ownership.md) now has
-isolated creation-UID/owner-graph coverage; live cluster attribution remains
-unverified. The Metrics API defines each reading's timestamp and averaging window;
-see the [Kubernetes resource metrics pipeline](https://kubernetes.io/docs/tasks/debug/debug-cluster/resource-metrics-pipeline/).
-Collection runs outside heartbeats with bounded command timeouts. Quota and
-metric observations do not automatically rewrite saved host limits.
-Cluster node/cgroup attribution and live cluster acceptance remain open. Do not enroll backing nodes as
-additional capacity for an already offered overlapping cluster pool.
+not additional capacity or an automatic grouping rule.
 
 ## API
 
@@ -348,8 +337,14 @@ automatically replay an uncertain save.
 `placementReady`. Image offers use health-qualified accepting state, which is also false
 while pressure blocks placement on a host that gates it. Heartbeats optionally carry bounded `health`, `resources`,
 `pressure` and `upkeep` reports and receive `checksRequestedAt`. Host identity may not switch provider after enrollment.
-Scoped setup credentials authorize only `/v1/hosts/enroll`; they cannot read
-inventory, issue setups or control guests. The dashboard proxies the administrative
+Scoped setup credentials are minted only by an operator, bound to the setup's
+name, provider and capacity, claimable by a single host identity (retries by
+that identity succeed) and expire 30 minutes after issue unless already
+claimed. They authorize only host enrollment: `/v1/hosts/enroll/setup`, which
+Kubernetes node bootstrap uses, and the legacy `/v1/hosts/enroll`, which
+accepts them for every provider, native inference included, in addition to the
+global enrollment token. They cannot read inventory, issue setups or control
+guests. The dashboard proxies the administrative
 paths with its existing session/CSRF checks. Its setup response also supplies the
 configured controller URL as an editable starting point; that origin may need a
 different externally reachable address for remote runners.
@@ -470,10 +465,10 @@ Use an administrator credential. Record the host ID and a UUID for the drain.
 
 1. Run `canaveral maintenance begin HOST --id UUID --reason TEXT`. The reason is optional. The CLI generates and prints a UUID if omitted. Retry an interrupted request with the same UUID, host and reason.
 2. Watch `canaveral maintenance status HOST`. Admission closes for new work. Existing work finishes. The warm pool retires its devices and pauses refills while admission is closed. Stop persistent machines explicitly, release leases and wait for receipts. Check the action beside each blocker in the dashboard. Upgrade an old agent using a managed update during the drain. [Runtime and storage upkeep](mobile-host-upkeep.md#host-operations) stays available during a drain; a queued or running operation blocks the power-off verdict, and one that ended unknown blocks resume until a listing or storage inspection acknowledges it, or an administrator records a [decision](mobile-host-upkeep.md#settling-an-unknown-change) for a host that can no longer be inspected. A host draining for a managed update accepts no new host operation.
-3. Read the current verdict immediately before power off or reboot. Safe to power off covers Canaveral-managed workloads on this direct host. Unsupported proof requires independent verification and keeps the verdict unsafe. A KubeVirt pool cannot establish safety for physical nodes.
+3. Read the current verdict immediately before power off or reboot. Safe to power off covers Canaveral-managed workloads on this direct host. Unsupported proof requires independent verification and keeps the verdict unsafe.
 4. Bring the same host back with its identity and storage intact. Wait for a fresh runner confirmation and a complete inventory. Investigate missing storage, unexpected resources and uncertain operations before resuming. On Android and iOS hosts, `canaveral upkeep inspect HOST` reports what each unexpected storage entry is, and an [orphan purge](mobile-host-upkeep.md#orphan-storage) removes the ones the host proves it created and no one owns.
 5. When readyToResume is true, run `canaveral maintenance resume HOST DRAIN_ID --request-id UUID` with a new request UUID. Reuse it on retries. Check the phase is resumed and inspect remaining admission owners. To cancel maintenance on the same boot, reconcile and resume in the same way.
 
 A resume refusal (409 maintenance_blocked) includes current blockers. Resolve those marked for resume and retry. Power-off-only blockers allow resume.
 
-Maintenance inventory checks the assigned KubeVirt root PVC by name in the configured namespace. A missing PVC or failed inspection blocks resume for materialized assignments. Unsupported storage inspection blocks only the power-off verdict. Apple and libvirt removal quarantines count as unexpected resources unless a current assignment has a matching unfinished deletion or lease cleanup.
+Missing backing storage or failed inspection blocks resume for materialized assignments. Unsupported storage inspection blocks only the power-off verdict. Apple and libvirt removal quarantines count as unexpected resources unless a current assignment has a matching unfinished deletion or lease cleanup.

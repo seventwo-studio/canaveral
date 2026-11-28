@@ -3,11 +3,15 @@
 Controller and worker contract, 2026-11-03. Fixture coverage establishes scoped
 eligibility and withdrawal behavior. Native deadline/cancellation/cleanup
 acceptance remains open; ordinary `Agent` configuration still rejects both
-`leaseProtocol` and `leaseImages` before creating runner state. There are two exceptions.
+`leaseProtocol` and `leaseImages` before creating runner state. There are three exceptions.
 Since 2026-11-19 a supervised Android host accepts Android selectors; see
 [Android emulator leases](mobile-control.md#android-emulator-leases). Since 2026-11-21 a
 supervised macOS host accepts iOS selectors that each declare the `shared-host` isolation
-class; see [iOS simulator leases](mobile-control.md#ios-simulator-leases).
+class; see [iOS simulator leases](mobile-control.md#ios-simulator-leases). Since 2026-11-24 a
+Linux 6.5+ libvirt host with the pinned lease helper accepts `runtime: "libvirt"` selectors
+that name a headless x64 BIOS Linux template without TPM, secure boot or guest access; see
+[libvirt supervision](libvirt-supervision.md#eligibility). An older kernel refuses them with
+`libvirt_lease_kernel_unsupported`.
 
 An installed image is not automatically eligible for consumer execution. A host
 offering `leaseProtocol: 1` must explicitly identify each eligible image revision,
@@ -38,7 +42,7 @@ Each entry has exactly `id`, `revision`, `arch` and `runtime`. An iOS entry, and
 entry, has a fifth field, `isolation`; see [isolation class](#isolation-class). It must uniquely
 match a currently offered installed image and that image's actual configured
 runtime. Physical hosts resolve runtimes through the existing platform/runtime
-configuration; legacy single-runtime and KubeVirt offers bind to their adapter.
+configuration; legacy single-runtime offers bind to their adapter.
 A selected legacy image cannot claim another runtime through its image metadata.
 
 Normalization bounds declarations to the existing 100-image offer limit and

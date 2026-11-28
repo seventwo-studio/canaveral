@@ -1,5 +1,8 @@
 # Canaveral
 
+[Get started](docs/getting-started.md) to run the controller from source, choose
+a host backend or install a signed release.
+
 Run the controller in Docker and replace its image through your external deployment workflow. Connected host agents and registered runners use [signed, managed runtime updates](docs/runtime-updates.md), with separate private state, idle checks, staged activation and rollback. The offline Unix bootstrap expands a verified baseline and generates a service definition for separate operator installation. Guest and native-helper adoption remains separately acknowledged; staging a bundle does not establish a live guest update.
 
 Canaveral provides a TypeScript controller, outbound TypeScript hosts, Rust execution components and an optional web dashboard for machine and local-model execution. The controller stores ownership, placements and capacity reservations in SQLite. Hosts advertise installed templates, pull assignments and report state. Lost hosts remain unknown; their machines are never silently duplicated.
@@ -18,7 +21,7 @@ Coding agents and CI jobs lease devices through the [agent surfaces](docs/agent-
 
 For installation boundaries, use the [target matrix](docs/running.md#installation-and-target-boundaries); keep [operator acceptance](docs/runtime-updates.md#operator-acceptance-prepare-only-separate-authorization-required) separate from portable fixtures.
 
-Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision, KubeVirt and the guest wire protocol.
+Start with [self-hosting](docs/self-hosting.md), [running](docs/running.md) and the [technical guide](docs/project-guidance.md). The CLI source is `coordination/src/cli.ts`; the controller modules are in `coordination/src/control`. The [consumer SDK](docs/consumer-sdk.md) and its terminal, visual and accessibility clients are TypeScript. Rust workspace components cover execution ownership, runner identity, model execution, Apple supervision and the guest wire protocol.
 
 Portable checks:
 

@@ -1,0 +1,13 @@
+{
+  "model": "smollm2-135m-instruct:q4-k-m",
+  "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
+  "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+  "url": "https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/9e6855bc4be717fca1ef21360a1db4b29d5c559a/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+  "bytes": 105454144,
+  "sha256": "ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747",
+  "license": "Apache-2.0",
+  "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0",
+  "notice": "Hugging Face TB trained SmolLM2-135M-Instruct. Unsloth published this GGUF quantization.",
+  "upstream": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct",
+  "modelCard": "https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/blob/9e6855bc4be717fca1ef21360a1db4b29d5c559a/README.md"
+}

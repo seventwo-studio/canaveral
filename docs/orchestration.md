@@ -35,13 +35,13 @@ older controller.
 
 ## Placement and reconciliation
 
-Canaveral stores machine placements and capacity reservations. Direct hosts and KubeVirt pools advertise capacity through the host API. Do not double-count pools and their underlying nodes. Embedded inference shares the capacity ledger; see [inference](inference.md) for its limits.
+Canaveral stores machine placements and capacity reservations. Direct hosts advertise capacity through the host API. Embedded inference shares the capacity ledger; see [inference](inference.md) for its limits.
 
 Native Android/iOS hosts offer [mobile device templates and control](devices.md)
 through the same machine scheduler. These provision independent SDK device
 instances; commands and durable results travel through host heartbeats.
 
-The central service owns machine intent, host enrollment, placement and resource reservations. A host agent owns local hypervisor operations. Hosts connect outbound to the service; the controller does not need inbound access to each host. A KubeVirt agent offers a bounded cluster pool and translates assignments to Kubernetes VMs; Kubernetes then schedules the VM pods onto suitable nodes.
+The central service owns machine intent, host enrollment, placement and resource reservations. A host agent owns local hypervisor operations. Hosts connect outbound to the service; the controller does not need inbound access to each host.
 
 ## Identity and admission
 
@@ -66,13 +66,13 @@ coverage; actual host-suspend acceptance remains open.
 
 Placements are durable and remain pinned when a host disappears. Observed state becomes unknown and reservations remain held. Automatic reassignment or live migration would require positive fencing of the old runtime and coordinated storage; neither is implemented. Existing hosts can reconnect with their saved identity after controller or worker restarts.
 
-Each adapter uses a deterministic VM name derived from the assignment UUID and checks ownership before controlling an existing resource. Local disks have owner records and are not overwritten. Partial disk creation, uncertain Apple runner launches and unsupported states surface an error/unknown state for inspection rather than creating another computer. A native agent uses an exclusive state-directory lock. Kubernetes workers must retain their state PVC and remain a single instance per offered pool.
+Each adapter uses a deterministic VM name derived from the assignment UUID and checks ownership before controlling an existing resource. Local disks have owner records and are not overwritten. Partial disk creation, uncertain Apple runner launches and unsupported states surface an error/unknown state for inspection rather than creating another computer. A native agent uses an exclusive state-directory lock.
 
-Templates can start from bootable base disks and prepare the guest after boot. Linux uses cloud-init NoCloud media, compatible Windows images use Cloudbase-Init ConfigDrive, and SSH preparation supports guests with configured remote access. KubeVirt clones offline base PVCs and references per-instance preparation Secrets. Native sources can be cached by verified SHA-256. macOS clones retain independent disk/platform files and run a preparation recipe over verified SSH. The [template contract](templates.md) documents sources, commands and readiness. A shared image build/import service, remote console proxying, deletion, snapshots and migration remain future work.
+Templates can start from bootable base disks and prepare the guest after boot. Linux uses cloud-init NoCloud media, compatible Windows images use Cloudbase-Init ConfigDrive, and SSH preparation supports guests with configured remote access. Native sources can be cached by verified SHA-256. macOS clones retain independent disk/platform files and run a preparation recipe over verified SSH. The [template contract](templates.md) documents sources, commands and readiness. A shared image build/import service, remote console proxying, deletion, snapshots and migration remain future work.
 
 The machine response includes separate runtime state, preparation state and a `ready` flag. Prepared images without a recipe report `notRequired`; configured recipes remain pending/failed until a positive guest or SSH receipt is recorded. Guest callbacks use a per-machine credential registered by the assigned host, whose hash is stored in the controller. That credential cannot create computers, read inventory or prepare another machine. Successful receipts survive retries, stale pending heartbeats and controller restarts. Preparation completion confirms the configured recipe; add workload checks to the recipe when readiness depends on a service or login path.
 
-Headless guests use serial or configured SSH access. Desktop guests expose the backend's console facilities or guest remote access: loopback-only VNC with libvirt, VMConnect with Hyper-V, `virtctl` with KubeVirt, and configured guest services or Canaveral guest helpers with the Apple runner. Running a desktop OS does not imply that Canaveral currently tunnels its display to the CLI client.
+Headless guests use serial or configured SSH access. Desktop guests expose the backend's console facilities or guest remote access: loopback-only VNC with libvirt, VMConnect with Hyper-V, and configured guest services or Canaveral guest helpers with the Apple runner. Running a desktop OS does not imply that Canaveral currently tunnels its display to the CLI client.
 
 ## HTTP API
 
@@ -118,7 +118,7 @@ Persist the controller database, credentials, host identities and template disks
 
 ## Backend sources
 
-The adapters follow the [libvirt domain format](https://libvirt.org/formatdomain.html), [Hyper-V PowerShell interface](https://learn.microsoft.com/en-us/powershell/module/hyper-v/), [KubeVirt run strategies](https://kubevirt.io/user-guide/compute/run_strategies/) and [CDI volume-cloning contract](https://github.com/kubevirt/containerized-data-importer/blob/main/doc/datavolumes.md). The existing Apple runtime uses Apple's Virtualization framework. Actual images, firmware and installed hypervisor versions need acceptance on each target host.
+The adapters follow the [libvirt domain format](https://libvirt.org/formatdomain.html) and [Hyper-V PowerShell interface](https://learn.microsoft.com/en-us/powershell/module/hyper-v/). The existing Apple runtime uses Apple's Virtualization framework. Actual images, firmware and installed hypervisor versions need acceptance on each target host.
 
 ## Manual maintenance drain
 

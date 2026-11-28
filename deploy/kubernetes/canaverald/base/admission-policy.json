@@ -1,0 +1,110 @@
+{
+  "apiVersion": "admissionregistration.k8s.io/v1",
+  "kind": "ValidatingAdmissionPolicy",
+  "metadata": {
+    "name": "canaverald-pod-security",
+    "annotations": {
+      "canaveral.dev/allowed-host-paths": "Directory:/var/lib/canaverald,Socket:/var/run/libvirt/libvirt-sock,Directory:/var/lib/libvirt/images/canaveral"
+    }
+  },
+  "spec": {
+    "failurePolicy": "Fail",
+    "matchConstraints": {
+      "resourceRules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "apiVersions": [
+            "v1"
+          ],
+          "operations": [
+            "CREATE",
+            "UPDATE"
+          ],
+          "resources": [
+            "pods",
+            "pods/ephemeralcontainers"
+          ]
+        }
+      ]
+    },
+    "validations": [
+      {
+        "expression": "!has(object.spec.hostNetwork) || object.spec.hostNetwork == false",
+        "message": "Pods must not use the host network.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.hostPID) || object.spec.hostPID == false",
+        "message": "Pods must not use the host PID namespace.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.hostIPC) || object.spec.hostIPC == false",
+        "message": "Pods must not use the host IPC namespace.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || ((v.hostPath.path == '/var/lib/canaverald' && has(v.hostPath.type) && v.hostPath.type == 'Directory') || (v.hostPath.path == '/var/run/libvirt/libvirt-sock' && has(v.hostPath.type) && v.hostPath.type == 'Socket') || (v.hostPath.path == '/var/lib/libvirt/images/canaveral' && has(v.hostPath.type) && v.hostPath.type == 'Directory')))",
+        "message": "hostPath volumes are limited to the canaverald state directory, the libvirt socket and VM storage with their exact types.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "object.spec.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false)",
+        "message": "Containers must not be privileged.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)",
+        "message": "Containers must set allowPrivilegeEscalation to false.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop.exists(d, d == 'ALL') && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0))",
+        "message": "Containers must drop ALL capabilities and add none.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "object.spec.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))",
+        "message": "Containers must not use host ports.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false)",
+        "message": "Init containers must not be privileged.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.initContainers) || object.spec.initContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)",
+        "message": "Init containers must set allowPrivilegeEscalation to false.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.initContainers) || object.spec.initContainers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop.exists(d, d == 'ALL') && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0))",
+        "message": "Init containers must drop ALL capabilities and add none.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))",
+        "message": "Init containers must not use host ports.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false)",
+        "message": "Ephemeral containers must not be privileged.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)",
+        "message": "Ephemeral containers must set allowPrivilegeEscalation to false.",
+        "reason": "Forbidden"
+      },
+      {
+        "expression": "!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop.exists(d, d == 'ALL') && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0))",
+        "message": "Ephemeral containers must drop ALL capabilities and add none.",
+        "reason": "Forbidden"
+      }
+    ]
+  }
+}

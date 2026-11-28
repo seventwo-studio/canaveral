@@ -323,3 +323,40 @@ test("warm-pool and baseline commands map to their administrator routes", async 
   const help = (await f.invoke(["--help"])).stdout;
   for (const line of ["warm-pool set HOST --request-file FILE", "baseline save MACHINE --name NAME --revision REV --request-id UUID", "baseline remove ID --request-id UUID"]) assert.ok(help.includes(line), line);
 }));
+
+test("node setup CLI saves native and libvirt tokens without disclosing them", async () => withFixture(async f => {
+  const config = join(f.root, "host.json"), capacity = { cpu: 2, memoryMiB: 1024, diskGiB: 10 };
+  const issued = token();
+  f.setReply(async call => ({ ...call.body, enrollmentToken: issued }));
+  for (const provider of ["native", "libvirt"]) {
+    const id = randomUUID(), path = join(f.root, provider + ".token"), name = provider + " node";
+    await fs.writeFile(config, JSON.stringify({ name, provider, capacity, enrollmentToken: "must-not-send" }));
+    const args = ["connection-setups", "create", "--config", config, "--id", id, "--output-file", path];
+    const result = await f.invoke(args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(f.calls.at(-1)?.body, { id, name, provider, capacity });
+    assert.equal(f.calls.at(-1)?.path, "/v1/connection-setups");
+    assert.equal(await fs.readFile(path, "utf8"), issued + "\n");
+    assert.equal((await fs.stat(path)).mode & 0o777, 0o600);
+    assert.ok(!result.stdout.includes(issued) && !result.stderr.includes(issued));
+    const calls = f.calls.length;
+    assert.equal((await f.invoke(args)).status, 1);
+    assert.equal(f.calls.length, calls, "existing output prevents issuance");
+  }
+  assert.equal((await f.invoke(["connection-setups", "list"])).status, 0);
+  assert.equal(f.calls.at(-1)?.method, "GET");
+  const id = randomUUID();
+  assert.equal((await f.invoke(["connection-setups", "revoke", id])).status, 0);
+  assert.equal(f.calls.at(-1)?.path, `/v1/connection-setups/${id}/revoke`);
+}));
+
+test("canaverald accepts the DaemonSet URL flag after config and state", async () => withFixture(async f => {
+  const config = join(f.root, "host.json");
+  await fs.writeFile(config, JSON.stringify({ deployment: "kubernetes", provider: "native", name: "node", capacity: { cpu: 1, memoryMiB: 128, diskGiB: 1 }, templates: [] }));
+  let output = "";
+  const result = await main(["--config", config, "--state", f.root, "--url", "https://controller.example.test"], {
+    stderr: value => { output += value; },
+  }, "canaverald");
+  assert.equal(result, 1);
+  assert.match(output, /kubernetes_bootstrap_token_invalid/);
+}));

@@ -1,20 +1,20 @@
 //! Canaveral-managed, pinned runtime provisioning. Sources are trusted release
 //! catalog metadata or distribution-bundled assets, never consumer input.
 use crate::{private, Config, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
+    fs::{File, Metadata},
     io::{Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-const FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(super) const FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(super) const PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimePackage {
     pub os: String,
@@ -28,7 +28,7 @@ pub struct RuntimePackage {
     #[serde(default)]
     pub executables: Vec<String>,
 }
-fn invalid() -> &'static str {
+pub(super) fn invalid() -> &'static str {
     "invalid pinned runtime package"
 }
 pub(super) fn hash_valid(value: &str) -> bool {
@@ -37,7 +37,7 @@ pub(super) fn hash_valid(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn parts(path: &str) -> Result<Vec<&str>> {
+pub(super) fn parts(path: &str) -> Result<Vec<&str>> {
     let values: Vec<_> = path.split('/').collect();
     if path.len() > 1024
         || values.len() > 32
@@ -54,7 +54,7 @@ fn parts(path: &str) -> Result<Vec<&str>> {
     }
     Ok(values)
 }
-fn base_url(value: &str, test_loopback: bool) -> Result<reqwest::Url> {
+pub(super) fn https_url(value: &str, test_loopback: bool) -> Result<reqwest::Url> {
     if value.len() > 4096 {
         return Err(invalid());
     }
@@ -77,13 +77,20 @@ fn base_url(value: &str, test_loopback: bool) -> Result<reqwest::Url> {
         || authority.contains('@')
         || url.query().is_some()
         || url.fragment().is_some()
-        || !url.path().ends_with('/')
+        || value.bytes().any(|b| b.is_ascii_control() || b == b'\\')
     {
         return Err("trusted HTTPS runtime release origin required");
     }
     Ok(url)
 }
-fn validate_package(package: &RuntimePackage, test_loopback: bool) -> Result<()> {
+fn base_url(value: &str, test_loopback: bool) -> Result<reqwest::Url> {
+    let url = https_url(value, test_loopback)?;
+    if !url.path().ends_with('/') {
+        return Err(invalid());
+    }
+    Ok(url)
+}
+pub(super) fn validate_package(package: &RuntimePackage, test_loopback: bool) -> Result<()> {
     if !matches!(package.os.as_str(), "linux" | "macos")
         || !matches!(package.arch.as_str(), "x86_64" | "aarch64")
         || package.files.is_empty()
@@ -134,6 +141,12 @@ fn validate_package(package: &RuntimePackage, test_loopback: bool) -> Result<()>
 }
 pub(super) fn validate(config: &Config) -> Result<()> {
     if config.runtime_packages.is_empty() {
+        if config.executable.as_os_str().is_empty()
+            && config.executable_sha256.is_empty()
+            && crate::runtime_archive::host_pin(config.backend).is_some()
+        {
+            return Ok(());
+        }
         if !config.executable.is_absolute() || !hash_valid(&config.executable_sha256) {
             return Err("absolute operator paths and pinned runtime hash required");
         }
@@ -177,7 +190,7 @@ fn trusted(file: &File, directory: bool) -> Result<()> {
     }
     Ok(())
 }
-fn directory(parent: &File, value: &str, create: bool) -> Result<File> {
+pub(super) fn directory(parent: &File, value: &str, create: bool) -> Result<File> {
     let n = private::name(value.as_ref())?;
     if create {
         let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), n.as_ptr(), 0o700) };
@@ -190,7 +203,7 @@ fn directory(parent: &File, value: &str, create: bool) -> Result<File> {
     trusted(&dir, true)?;
     Ok(dir)
 }
-fn executable(package: &RuntimePackage, path: &str) -> bool {
+pub(super) fn executable(package: &RuntimePackage, path: &str) -> bool {
     path == package.entrypoint || package.executables.iter().any(|v| v == path)
 }
 fn native_entrypoint(os: &str, magic: [u8; 4]) -> bool {
@@ -210,7 +223,7 @@ fn native_entrypoint(os: &str, magic: [u8; 4]) -> bool {
         _ => false,
     }
 }
-fn identity(package: &RuntimePackage) -> Result<String> {
+pub(super) fn identity(package: &RuntimePackage) -> Result<String> {
     // Sources are excluded: a pinned artifact has the same identity when bundled
     // or fetched. Permissions and layout are part of artifact identity.
     let executables: BTreeSet<_> = package
@@ -257,7 +270,105 @@ fn copy_hashed(
     }
     Ok(())
 }
-fn verify_cache(package: &RuntimePackage, root: &File, deadline: Instant) -> Result<()> {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    uid: u32,
+    ctime: (i64, i64),
+    mtime: (i64, i64),
+}
+
+impl ExecutableIdentity {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+        }
+    }
+}
+
+pub(super) type Executables = BTreeMap<String, ExecutableIdentity>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct StagedRuntime {
+    pub entrypoint: PathBuf,
+    root: PathBuf,
+    executables: Executables,
+}
+
+impl StagedRuntime {
+    pub fn new(root: PathBuf, entrypoint: &str, executables: Executables) -> Self {
+        Self {
+            entrypoint: root.join(entrypoint),
+            root,
+            executables,
+        }
+    }
+
+    pub fn configure_loader(&self, command: &mut std::process::Command) -> Result<()> {
+        // Release archives place libraries beside the executable or under lib/ollama.
+        let library = self.root.join("lib/ollama");
+        // glibc accepts semicolons as well as colons and expands dollar tokens.
+        // Use the same path policy for dyld so packages are portable.
+        const UNSAFE_PATH: &str = "runtime_loader_path_unsafe";
+        for path in [&self.root, &library, &self.entrypoint] {
+            if !path.is_absolute()
+                || path
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .iter()
+                    .any(|byte| matches!(byte, b':' | b';' | b'$' | 0))
+            {
+                return Err(UNSAFE_PATH);
+            }
+        }
+        let path = std::env::join_paths(
+            std::iter::once(self.root.as_path())
+                .chain(library.is_dir().then_some(library.as_path())),
+        )
+        .map_err(|_| UNSAFE_PATH)?;
+        let variable = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        command.env(variable, path);
+        Ok(())
+    }
+
+    pub fn verify_executables(&self, state: &private::Directory) -> Result<()> {
+        for (relative, expected) in &self.executables {
+            let path = self.root.join(relative);
+            let parent = path.parent().ok_or_else(invalid)?;
+            let name = private::name(path.file_name().ok_or_else(invalid)?)?;
+            let file = private::openat(&private::walk(parent)?, &name, libc::O_RDONLY)?;
+            trusted(&file, false)?;
+            let metadata = file.metadata().map_err(|_| invalid())?;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o500 {
+                return Err("unsafe staged runtime executable");
+            }
+            if &ExecutableIdentity::from_metadata(&metadata) != expected {
+                return Err("staged runtime executable changed after verification");
+            }
+        }
+        state.check()
+    }
+}
+
+pub(super) fn verify_cache(
+    package: &RuntimePackage,
+    root: &File,
+    deadline: Instant,
+    archive_manifest: Option<&[u8]>,
+) -> Result<Executables> {
     let mut expected = BTreeMap::new();
     for path in package.files.keys() {
         expected.insert(path.clone(), false);
@@ -273,6 +384,7 @@ fn verify_cache(package: &RuntimePackage, root: &File, deadline: Instant) -> Res
         expected: &mut BTreeMap<String, bool>,
         total: &mut u64,
         deadline: Instant,
+        executables: &mut Executables,
     ) -> Result<()> {
         trusted(dir, true)?;
         let meta = dir.metadata().map_err(|_| invalid())?;
@@ -296,6 +408,7 @@ fn verify_cache(package: &RuntimePackage, root: &File, deadline: Instant) -> Res
                     expected,
                     total,
                     deadline,
+                    executables,
                 )?,
                 false => {
                     let mut file =
@@ -324,41 +437,81 @@ fn verify_cache(package: &RuntimePackage, root: &File, deadline: Instant) -> Res
                     }
                     copy_hashed(&mut file, None, &package.files[&path], total, deadline)?;
                     trusted(&file, false)?;
+                    if mode == 0o500 {
+                        let identity = ExecutableIdentity::from_metadata(&m);
+                        let after = file.metadata().map_err(|_| invalid())?;
+                        if identity != ExecutableIdentity::from_metadata(&after) {
+                            return Err("staged runtime executable changed during verification");
+                        }
+                        executables.insert(path, identity);
+                    }
                 }
             }
         }
         Ok(())
     }
-    visit(package, root, "", &mut expected, &mut 0, deadline)?;
+    let content;
+    let package = if let Some(bytes) = archive_manifest {
+        expected.insert(crate::runtime_archive::MANIFEST.to_owned(), false);
+        content = {
+            let mut content = package.clone();
+            content.files.insert(
+                crate::runtime_archive::MANIFEST.to_owned(),
+                format!("{:x}", Sha256::digest(bytes)),
+            );
+            content
+        };
+        &content
+    } else {
+        package
+    };
+    let mut executables = Executables::new();
+    visit(
+        package,
+        root,
+        "",
+        &mut expected,
+        &mut 0,
+        deadline,
+        &mut executables,
+    )?;
     if !expected.is_empty() {
         return Err("incomplete installed runtime package");
     }
-    Ok(())
+    Ok(executables)
 }
 pub(super) fn stage(
     package: &RuntimePackage,
     state: &private::Directory,
     state_path: &Path,
-) -> Result<PathBuf> {
-    stage_inner(package, state, state_path, false)
+    references: &crate::PackageReferences,
+) -> Result<StagedRuntime> {
+    stage_inner(package, state, state_path, false, references)
 }
 fn stage_inner(
     package: &RuntimePackage,
     state: &private::Directory,
     state_path: &Path,
     test_loopback: bool,
-) -> Result<PathBuf> {
+    references: &crate::PackageReferences,
+) -> Result<StagedRuntime> {
     validate_package(package, test_loopback)?;
     state.check()?;
     let cache = identity(package)?;
-    let installed_path = state_path.join(&cache).join(&package.entrypoint);
+    let installed_path = state_path.join(&cache);
     let deadline = Instant::now() + Duration::from_secs(600);
     if let Some(installed) = state.cached_package(&cache)? {
         // Tampering is an error, never an instruction to overwrite evidence.
-        verify_cache(package, &installed, deadline)?;
+        let executables = verify_cache(package, &installed, deadline, None)?;
         state.check()?;
-        state.prune_packages(&cache)?;
-        return Ok(installed_path);
+        state.prune_packages(&cache, references, |_, root| {
+            matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
+        })?;
+        return Ok(StagedRuntime::new(
+            installed_path,
+            &package.entrypoint,
+            executables,
+        ));
     }
     let source = if package.base_url.is_none() {
         let source = private::walk(&package.root)?;
@@ -368,16 +521,7 @@ fn stage_inner(
         None
     };
     let client = if package.base_url.is_some() {
-        Some(
-            reqwest::blocking::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(120))
-                .build()
-                .map_err(|_| "runtime provisioner unavailable")?,
-        )
+        Some(download_client(reqwest::redirect::Policy::none())?)
     } else {
         None
     };
@@ -460,11 +604,42 @@ fn stage_inner(
         target.sync_all().map_err(|_| invalid())?;
         dst.sync_all().map_err(|_| invalid())?;
     }
+    let executables = publish(package, state, &output, &cache, deadline, None)?;
+    state.prune_packages(&cache, references, |_, root| {
+        matches!(crate::runtime_archive::manifest_bytes(root), Ok(None))
+    })?;
+    Ok(StagedRuntime::new(
+        installed_path,
+        &package.entrypoint,
+        executables,
+    ))
+}
+
+pub(super) fn download_client(
+    policy: reqwest::redirect::Policy,
+) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(policy)
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| "runtime provisioner unavailable")
+}
+
+pub(super) fn publish(
+    package: &RuntimePackage,
+    state: &private::Directory,
+    output: &File,
+    cache: &str,
+    deadline: Instant,
+    archive_manifest: Option<&[u8]>,
+) -> Result<Executables> {
     output.sync_all().map_err(|_| invalid())?;
-    verify_cache(package, &output, deadline)?;
-    state.publish_package(&cache)?;
-    state.prune_packages(&cache)?;
-    Ok(installed_path)
+    let executables = verify_cache(package, output, deadline, archive_manifest)?;
+    state.publish_package(cache, output)?;
+    Ok(executables)
 }
 
 #[cfg(test)]
@@ -500,6 +675,39 @@ mod tests {
     fn root() -> tempfile::TempDir {
         tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
     }
+    #[test]
+    fn loader_paths_require_absolute_literal_entries() {
+        let root = root();
+        let safe = root.path().join("release assets");
+        let library = safe.join("lib/ollama");
+        fs::create_dir_all(&library).unwrap();
+        let mut command = std::process::Command::new("unused");
+        StagedRuntime::new(safe.clone(), "bin/server", Executables::new())
+            .configure_loader(&mut command)
+            .unwrap();
+        let (_, value) = command.get_envs().next().unwrap();
+        assert_eq!(
+            std::env::split_paths(value.unwrap()).collect::<Vec<_>>(),
+            [safe, library]
+        );
+
+        for name in [
+            "release:assets",
+            "release;assets",
+            "release$assets",
+            "release\0assets",
+        ] {
+            let mut command = std::process::Command::new("unused");
+            let staged =
+                StagedRuntime::new(root.path().join(name), "bin/server", Executables::new());
+            assert_eq!(
+                staged.configure_loader(&mut command),
+                Err("runtime_loader_path_unsafe")
+            );
+            assert_eq!(command.get_envs().count(), 0);
+        }
+    }
+
     fn serve(
         bodies: Vec<(u16, Vec<u8>)>,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
@@ -571,7 +779,7 @@ mod tests {
             format!("{:x}", Sha256::digest(script)),
         );
         assert_eq!(
-            stage_inner(&p, &state, &state_path, true),
+            stage_inner(&p, &state, &state_path, true, &Default::default()),
             Err("native runtime entrypoint required")
         );
         task.join().unwrap();
@@ -587,7 +795,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            stage_inner(&p, &state, &state_path, true),
+            stage_inner(&p, &state, &state_path, true, &Default::default()),
             Err("native runtime entrypoint required")
         );
         assert!(!state_path.join("claim.json").exists());
@@ -641,28 +849,34 @@ mod tests {
             format!("{:x}", Sha256::digest(b"helper fixture")),
         );
         p.executables.push("bin/helper".into());
-        let installed = stage_inner(&p, &state, &state_path, true).unwrap();
+        let installed = stage_inner(&p, &state, &state_path, true, &Default::default()).unwrap();
         task.join().unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2);
-        assert_eq!(fs::read(&installed).unwrap(), RUNTIME_BYTES);
+        assert_eq!(fs::read(&installed.entrypoint).unwrap(), RUNTIME_BYTES);
         assert_eq!(
-            fs::metadata(installed.with_file_name("helper"))
+            fs::metadata(installed.entrypoint.with_file_name("helper"))
                 .unwrap()
                 .mode()
                 & 0o777,
             0o500
         );
         assert_eq!(
-            stage_inner(&p, &state, &state_path, true).unwrap(),
+            stage_inner(&p, &state, &state_path, true, &Default::default()).unwrap(),
             installed
         );
         assert_eq!(count.load(Ordering::SeqCst), 2); // Listener is closed: cached work needs no network.
         assert!(!state_path.join("claim.json").exists());
-        fs::set_permissions(&installed, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(&installed, b"tampered").unwrap();
-        fs::set_permissions(&installed, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(stage_inner(&p, &state, &state_path, true).is_err());
-        assert_eq!(fs::read(&installed).unwrap(), b"tampered"); // Preserve evidence; no repair download.
+        installed.verify_executables(&state).unwrap();
+        let helper = installed.entrypoint.with_file_name("helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&helper, b"mutate fixture").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            installed.verify_executables(&state),
+            Err("staged runtime executable changed after verification")
+        );
+        assert!(stage_inner(&p, &state, &state_path, true, &Default::default()).is_err());
+        assert_eq!(fs::read(&helper).unwrap(), b"mutate fixture"); // Preserve evidence; no repair download.
     }
     #[test]
     fn failed_download_and_redirect_never_publish_or_create_claim() {
@@ -677,7 +891,7 @@ mod tests {
             let (url, count, task) = serve(vec![(status, body)]);
             let mut p = package(PathBuf::new());
             p.base_url = Some(url);
-            assert!(stage_inner(&p, &state, &path, true).is_err());
+            assert!(stage_inner(&p, &state, &path, true, &Default::default()).is_err());
             task.join().unwrap();
             assert_eq!(count.load(Ordering::SeqCst), 1);
             assert!(!path.join(identity(&p).unwrap()).exists());
@@ -699,19 +913,29 @@ mod tests {
             let p = package(source.clone());
             let path = temp.path().join("state");
             let state = private::Directory::open(&path).unwrap();
-            let installed = stage(&p, &state, &path).unwrap();
+            let installed = stage(&p, &state, &path, &Default::default()).unwrap();
             fs::remove_dir_all(&source).unwrap();
-            assert_eq!(stage(&p, &state, &path).unwrap(), installed);
+            assert_eq!(
+                stage(&p, &state, &path, &Default::default()).unwrap(),
+                installed
+            );
             match mode {
-                "extra" => fs::write(installed.with_file_name("extra"), b"stale").unwrap(),
-                "symlink" => {
-                    fs::remove_file(&installed).unwrap();
-                    symlink("/does-not-exist", &installed).unwrap();
+                "extra" => {
+                    fs::write(installed.entrypoint.with_file_name("extra"), b"stale").unwrap()
                 }
-                "hardlink" => fs::hard_link(&installed, temp.path().join("hardlink")).unwrap(),
+                "symlink" => {
+                    fs::remove_file(&installed.entrypoint).unwrap();
+                    symlink("/does-not-exist", &installed.entrypoint).unwrap();
+                }
+                "hardlink" => {
+                    fs::hard_link(&installed.entrypoint, temp.path().join("hardlink")).unwrap()
+                }
                 _ => unreachable!(),
             }
-            assert!(stage(&p, &state, &path).is_err(), "{mode}");
+            assert!(
+                stage(&p, &state, &path, &Default::default()).is_err(),
+                "{mode}"
+            );
         }
     }
     #[test]
@@ -728,7 +952,7 @@ mod tests {
         let mut p = package(source.clone());
         let path = temp.path().join("state");
         let state = private::Directory::open(&path).unwrap();
-        let old = stage(&p, &state, &path).unwrap();
+        let old = stage(&p, &state, &path, &Default::default()).unwrap();
         let next = path.join("runtime-package.next");
         fs::create_dir(&next).unwrap();
         fs::write(next.join("unpublished"), b"partial").unwrap();
@@ -736,15 +960,36 @@ mod tests {
             "data/new".into(),
             format!("{:x}", Sha256::digest(b"new version")),
         );
-        assert!(stage(&p, &state, &path).is_err()); // Missing new source: old version remains usable.
-        assert!(old.exists());
+        assert!(stage(&p, &state, &path, &Default::default()).is_err()); // Missing new source: old version remains usable.
+        assert!(old.entrypoint.exists());
         fs::create_dir(source.join("data")).unwrap();
         fs::write(source.join("data/new"), b"new version").unwrap();
-        let installed = stage(&p, &state, &path).unwrap();
-        assert!(!old.exists());
-        assert!(installed.exists());
+        let old_cache = old
+            .entrypoint
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_start_matches("runtime-package.");
+        let referenced = crate::PackageReferences {
+            all: false,
+            digests: [old_cache.to_owned()].into_iter().collect(),
+        };
+        let installed = stage(&p, &state, &path, &referenced).unwrap();
+        assert!(old.entrypoint.exists());
+        assert_eq!(
+            stage(&p, &state, &path, &Default::default()).unwrap(),
+            installed
+        );
+        assert!(!old.entrypoint.exists());
+        assert!(installed.entrypoint.exists());
         assert!(!next.exists());
         assert!(!installed
+            .entrypoint
             .parent()
             .unwrap()
             .parent()

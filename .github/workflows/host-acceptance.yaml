@@ -1,0 +1,132 @@
+name: Host runtime acceptance
+
+on:
+  push:
+    branches: ['feat/runtime-acceptance*']
+  pull_request:
+    paths:
+      - '.github/workflows/host-acceptance.yaml'
+      - 'crates/host-installer/**'
+      - 'coordination/src/host-runtimes/**'
+      - 'coordination/test/host-runtimes*.ts'
+      - 'fixtures/host-runtimes/**'
+      - 'Cargo.lock'
+      - 'coordination/package-lock.json'
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - run: cargo test --locked -p canaveral-host-installer
+      - working-directory: coordination
+        run: |
+          npm ci
+          npm run build
+          node --test dist/test/host-runtimes.test.js dist/test/host-runtimes-native.test.js
+
+  containerd:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Start evidence record
+        shell: bash
+        env:
+          BACKEND: containerd
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash fixtures/host-runtimes/init-evidence.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Build installer and coordination
+        shell: bash
+        run: |
+          source fixtures/host-runtimes/evidence.sh
+          begin "Build installer and coordination"
+          cargo build --locked --release -p canaveral-host-installer
+          cd coordination
+          npm ci
+          npm run build
+          echo "::endgroup::"
+      - name: Exercise the managed systemd lifecycle
+        run: bash fixtures/host-runtimes/containerd.sh
+      - name: Upload JSON evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: host-containerd-${{ matrix.runner }}
+          path: ${{ runner.temp }}/host-evidence.json
+          if-no-files-found: error
+
+  virtualization:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            backend: libvirt
+          - runner: ubuntu-24.04-arm
+            backend: libvirt
+          - runner: macos-15
+            backend: apple-virtualization
+          - runner: macos-26
+            backend: apple-virtualization
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Start evidence record
+        shell: bash
+        env:
+          BACKEND: ${{ matrix.backend }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash fixtures/host-runtimes/init-evidence.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.11.0'
+      - name: Build coordination
+        shell: bash
+        run: |
+          source fixtures/host-runtimes/evidence.sh
+          begin "Build coordination"
+          cd coordination
+          npm ci
+          npm run build
+          echo "::endgroup::"
+      - name: Probe virtualization as the runner
+        run: bash fixtures/host-runtimes/virtualization.sh
+      - name: Upload JSON evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: host-${{ matrix.backend }}-${{ matrix.runner }}
+          path: ${{ runner.temp }}/host-evidence.json
+          if-no-files-found: error

@@ -4,9 +4,7 @@
 controller's owned SQLite worker and HTTP handler. It implements the application/lease
 subset of the [consumer HTTP contract](consumer-api.md) that the
 [TypeScript consumer SDK](consumer-sdk.md) uses, plus operator configuration and an
-outbound runner wire. It is provider-neutral across two execution backends that host
-a Linux guest: `kubevirt` and `appleVirtualization` (a Linux guest on Apple
-Virtualization; this is not macOS guest scope). It contains no VM executor, image
+outbound runner wire. Headless Linux guests use the `appleVirtualization` backend. It contains no VM executor, image
 ingestion, PTY or file path, and no native evidence. Its experimental
 [command operation path](linux-command-operations.md) uses durable bound runner handoffs. A lease never becomes
 `ready` without an explicit runner runtime and capability report.
@@ -42,7 +40,7 @@ changed one is a 409. Entries are immutable.
 | `/v1/linux-lease-runner-approvals` | `{binding, domainId, backend, images: [{id, revision, arch, digest}]}` | Maps one current binding to one [resource domain](model-controller.md#reservations-and-limits), one backend and the exact images it has installed |
 | `/v1/linux-lease-runner-approvals/revoke` | `{binding}` | Blocks new placement and claims; existing assignments keep reservations and report authority |
 
-`backend` is `kubevirt` or `appleVirtualization`. An approval refuses images of
+`backend` is `appleVirtualization`. An approval refuses images of
 another backend. Graphics and accessibility capabilities (`screenshot`,
 `displayStream`, `input`, `hierarchy`) are refused with `capability_unsupported`;
 they are never substituted by host access. Approvals belong to one generation; a
@@ -52,7 +50,7 @@ reenrolled runner inherits none. Nothing is discovered or approved automatically
 
 | Route | Credential | Result |
 | --- | --- | --- |
-| `GET /v1/environments/templates` | application | Granted images with `available` (a current approval serves the digest), `runtime` (`kubevirt` or `apple`) and the application's limits |
+| `GET /v1/environments/templates` | application | Granted images with `available` (a current approval serves the digest), `runtime` (`apple`) and the application's limits |
 | `POST /v1/leases` | application | `201` lease for new admission, `200` for an identical replay |
 | `GET /v1/leases[?after=<id>]` | application | At most 100 owned leases in ID order with `nextCursor` |
 | `GET /v1/leases/{id}` | owner or lease key | Lease view |
@@ -131,7 +129,7 @@ as every effect.
   "id": "<assignment UUID>", "claimId": "<runner claim UUID>", "leaseId": "<lease UUID>",
   "memberId": "<per-lease member UUID>", "domainId": "<resource domain UUID>",
   "sequence": 0, "closed": false,
-  "image": { "id": "linux-dev", "revision": "1", "arch": "amd64", "backend": "kubevirt", "digest": "sha256:<64 hex>" },
+  "image": { "id": "linux-dev", "revision": "1", "arch": "amd64", "backend": "appleVirtualization", "digest": "sha256:<64 hex>" },
   "resources": { "cpu": 2, "memoryMiB": 4096, "diskGiB": 20 },
   "capabilities": ["command", "files"], "requiredCapabilities": ["command"],
   "lease": { "state": "provisioning", "revision": 1, "expiresAt": 1798800000, "controllerNow": 1798798200 },
@@ -139,8 +137,7 @@ as every effect.
 }
 ```
 
-- `image.backend` is `kubevirt` or `appleVirtualization` (a Linux guest on Apple
-  Virtualization). It is fixed by the operator catalog entry and must equal the backend
+- `image.backend` is `appleVirtualization`. It is fixed by the operator catalog entry and must equal the backend
   the binding's approval names. The guest OS is always Linux; there is no host-process
   substitution.
 - `image` is immutable and digest-pinned. Resolve it only against operator-installed
@@ -181,7 +178,7 @@ existing reservation; it never reserves twice. `null` records nothing.
 
 ```json
 {
-  "leaseId": "<lease UUID>", "memberId": "<member UUID>", "backend": "kubevirt", "imageDigest": "sha256:<64 hex>",
+  "leaseId": "<lease UUID>", "memberId": "<member UUID>", "backend": "appleVirtualization", "imageDigest": "sha256:<64 hex>",
   "observedRevision": 1,
   "runtimeState": "starting | running | stopped | unknown",
   "ready": { "command": false, "pty": false, "files": false },
@@ -250,7 +247,7 @@ TypeScript command ledger and runner wire, without native execution acceptance.
 The [Rust Apple satellite](../crates/apple-satellite/README.md) implements this wire
 for `appleVirtualization`. `fixtures/apple-satellite/public-api.mjs` drives it
 against this controller over TLS with a fake native helper; that is fixture
-evidence, not VM or native acceptance. KubeVirt has no runner adapter yet.
+evidence, not VM or native acceptance.
 
 ## Reservations and limits
 
@@ -300,8 +297,7 @@ exact without sleeps. It covers:
   restarts; `unknown` retention; revoked and newer-generation denial; no failover;
   fresh-lease key and member isolation; retained legacy rows.
 
-These fixtures are source evidence only. They do not show VM execution on either
-backend, image ingestion, guest access, native stop or cleanup, TLS deployment or
+These fixtures are source evidence only. They do not show VM execution, image ingestion, guest access, native stop or cleanup, TLS deployment or
 release acceptance.
 
 <a id="st-535-assignment-and-transfer-wire-unimplemented-contract"></a>
@@ -311,8 +307,7 @@ release acceptance.
 Controller status: implemented in TypeScript, with additive legacy-compatible
 storage and portable tests. Runtime and native acceptance remain separate gates.
 
-This controller extension is for the direct-boot Apple adapter only; KubeVirt has
-no dispatch implementation. Native acceptance is still required.
+This extension serves the direct-boot Apple adapter. Native acceptance is still required.
 The [consumer transfer routes](consumer-api.md#st-535-linux-file-routes-unimplemented-contract),
 [guest data frames](guest-wire.md#st-535-data-protocol-contract-unimplemented)
 and [egress policy](linux-egress-policy.md) form the same contract.

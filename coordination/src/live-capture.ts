@@ -42,8 +42,14 @@ export interface LiveCaptureSource {
   /** A recording of this device is waiting to start. No live epoch starts meanwhile, so the
    * recording finds the device free. */
   recordingQueued?(): boolean;
+  /** The local fence of this source's lease, sampled when the running epoch loses authority. */
+  leaseFence?(): LeaseCaptureFence | undefined;
 }
-export type LiveReceipt = { cleaned: true } | { hostCleaned: true };
+export type LeaseCaptureFence = { cause: 'fence'; leaseId: string; leaseRevision: number };
+export type LiveReceipt = ({ cleaned: true } | { hostCleaned: true }) & { stop?: LeaseCaptureFence };
+class CaptureFenced extends ServiceError {
+  constructor(readonly stop: LeaseCaptureFence) { super('The local lease fence stopped live capture.', 410); }
+}
 export interface LiveHubOptions {
   load(captureId: string): Record<string, unknown> | undefined;
   save(captureId: string, value: Record<string, unknown>): void;
@@ -161,6 +167,8 @@ class Capture {
   private feed: Feed | undefined;
   private nativeStarted = false;
   private encodersExited = true;
+  private fence: LeaseCaptureFence | undefined;
+  private lastViewerFence: LeaseCaptureFence | undefined;
   private running: Promise<void> | undefined;
   /** A failed epoch: no further epoch starts while its viewers are being told. */
   private halted = false;
@@ -193,12 +201,18 @@ class Capture {
     this.feed.listener = undefined; this.feed.wanted = () => false; this.feed = undefined;
   }
   subscribe(live: () => boolean): LiveSubscription {
-    const s = new Subscription(this, live); this.subscribers.add(s);
+    const s = new Subscription(this, live); this.subscribers.add(s); this.lastViewerFence = undefined;
     if (this.ended) s.finish(this.ended);
     else if (this.feed?.init) s.begin(this.epoch, this.feed.init, this.feed.gop);
     this.poke(); return s;
   }
-  unsubscribe(s: Subscription): void { this.subscribers.delete(s); this.poke(); }
+  unsubscribe(s: Subscription): void {
+    if (this.subscribers.delete(s) && !this.subscribers.size && this.running && !this.ended &&
+        !this.hub.recording(this.job.machineId) && this.source?.recordingQueued?.() !== true) {
+      this.lastViewerFence = this.source?.leaseFence?.();
+    }
+    this.poke();
+  }
   release(): void { if (--this.refs <= 0) { this.closing = true; this.poke(); } }
   finish(reason: LiveHostEndReason): void {
     if (this.ended) return;
@@ -216,9 +230,9 @@ class Capture {
     this.finish('capture_failed');
   }
   /** One run of the recording pipeline whose consumer is this capture's viewers. */
-  private async runEpoch(source: LiveCaptureSource): Promise<{ cleaned: boolean; natural: boolean }> {
+  private async runEpoch(source: LiveCaptureSource): Promise<{ cleaned: boolean; natural: boolean; fence?: LeaseCaptureFence }> {
     const feed = new Feed(), options: VideoOptions = { fps: LIVE_FPS, durationSeconds: this.hub.options.epochSeconds ?? LIVE_EPOCH_SECONDS, bitRate: LIVE_BIT_RATE };
-    let finished = false, cleaned = false, natural = false, encoderExited = true;
+    let finished = false, cleaned = false, natural = false, encoderExited = true, fence: LeaseCaptureFence | undefined;
     // The hub stands where a recording's consumer would: it takes the bytes, never sends input,
     // and acknowledges the finish receipt of an epoch that ran to its own end.
     const channel: SessionChannel = {
@@ -227,7 +241,14 @@ class Capture {
       sendBytes: async data => { feed.push(data); },
       close: () => {},
     };
-    const authorized = () => this.wanted();
+    const authorized = () => {
+      if (this.wanted()) return true;
+      // Preemption or a departed viewer can stop an epoch independently of a later fence.
+      const stop = this.lastViewerFence ?? (!this.closing && !this.ended && this.subscribers.size &&
+        !this.hub.recording(this.job.machineId) && source.recordingQueued?.() !== true ? source.leaseFence?.() : undefined);
+      if (stop) throw new CaptureFenced(stop);
+      return false;
+    };
     // Journal before native dispatch. Without a durable journal nothing is dispatched.
     if (!this.nativeStarted) {
       try { this.hub.journal(this.job, { state: 'started' }); } catch { return { cleaned: true, natural: false }; }
@@ -239,16 +260,23 @@ class Capture {
     // opened. A refusal after which provably nothing native runs is clean at once; any other
     // failure to open stays unproven.
     try { pipe = await source.openSource(options, authorized); }
-    catch (error) { cleaned = source.notRunning(error); }
+    catch (error) {
+      cleaned = source.notRunning(error);
+      if (error instanceof CaptureFenced) fence = error.stop;
+    }
     if (pipe) {
       try {
-        await serveMobileVideo(channel, pipe, argv => source.openEncoder(argv), source.encoder, options, authorized, (positive, parts) => { cleaned = positive; encoderExited = parts.encoder; });
+        await serveMobileVideo(channel, pipe, argv => source.openEncoder(argv), source.encoder, options, authorized, (positive, parts, error) => {
+          cleaned = positive;
+          encoderExited = parts.encoder;
+          if (error instanceof CaptureFenced) fence = error.stop;
+        });
         cleaned = true; natural = true;
       } catch { /* The cleanup callback decided. */ }
     }
     this.detach(feed);
     if (!encoderExited) this.encodersExited = false;
-    return { cleaned, natural };
+    return { cleaned, natural, ...(fence ? { fence } : {}) };
   }
   private async drive(): Promise<void> {
     await Promise.resolve();
@@ -262,9 +290,10 @@ class Capture {
       const started = performance.now(), brief = Math.min(SHORT_EPOCH_MS, (this.hub.options.epochSeconds ?? LIVE_EPOCH_SECONDS) * 500);
       let release!: () => void;
       this.running = new Promise<void>(resolve => { release = resolve; });
-      let outcome: { cleaned: boolean; natural: boolean };
+      let outcome: Awaited<ReturnType<Capture['runEpoch']>>;
       try { outcome = await this.runEpoch(this.source); } finally { this.running = undefined; release(); }
-      if (!outcome.cleaned) { this.unknown = true; await this.fail(); }
+      if (outcome.fence) { this.fence = outcome.fence; this.unknown = !outcome.cleaned; this.halted = true; }
+      else if (!outcome.cleaned) { this.unknown = true; await this.fail(); }
       // An epoch that stopped while its viewers still held authority failed; it is not retried.
       else if (!outcome.natural && this.wanted()) await this.fail();
       else if (outcome.natural) { short = performance.now() - started < brief ? short + 1 : 0; if (short >= 3) this.finish('capture_failed'); }
@@ -273,8 +302,9 @@ class Capture {
     for (const s of this.subscribers) s.finish(this.ended ?? 'capture_ended');
     // Nothing native was dispatched, or every epoch was proven clean: positive cleanup. Otherwise a
     // confirmed encoder exit may be reported for a guest recorder; anything else stays unknown.
-    const receipt: LiveReceipt | undefined = !this.nativeStarted || !this.unknown ? { cleaned: true } : this.encodersExited && this.source?.guestSource ? { hostCleaned: true } : undefined;
-    this.hub.journal(this.job, { state: receipt && 'cleaned' in receipt ? 'finished' : 'unknown', cleaned: !!receipt && 'cleaned' in receipt, ...(receipt && 'hostCleaned' in receipt ? { hostCleaned: true } : {}) });
+    const stop = this.fence ? { stop: this.fence } : {};
+    const receipt: LiveReceipt | undefined = !this.nativeStarted || !this.unknown ? { cleaned: true, ...stop } : this.encodersExited && this.source?.guestSource ? { hostCleaned: true, ...stop } : undefined;
+    this.hub.journal(this.job, { state: receipt && 'cleaned' in receipt ? 'finished' : 'unknown', cleaned: !!receipt && 'cleaned' in receipt, ...(receipt && 'hostCleaned' in receipt ? { hostCleaned: true } : {}), ...stop });
     this.hub.forget(this);
     if (receipt) await this.hub.options.report(this.job, receipt).catch(() => {});
   }

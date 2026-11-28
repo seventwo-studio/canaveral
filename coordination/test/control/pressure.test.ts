@@ -342,15 +342,11 @@ test("a runner turns scripted samples into a held state; the controller withhold
   assert.equal(await tick(mac("normal")), "normal");
   assert.equal(create().hostId, runner.identity!.id);
 
-  // An operator can switch the report off; a KubeVirt pool runner never reports its own pod as the pool.
+  // An operator can switch the report off.
   const disabled = new HostRunner({ ...config, stateDir: join(root, "disabled-state"), pressure: { enabled: false } }, dependencies); runners.push(disabled);
   await disabled.samplePressure();
   assert.deepEqual(disabled.pressureReport, { version: 1, state: "disabled", sampledAt: now });
-  const pool = new HostRunner({ ...config, provider: "kubevirt", templates: [], stateDir: join(root, "pool-state"), pressure: { clearSeconds: 30 } }, dependencies); runners.push(pool);
-  await pool.samplePressure();
-  assert.equal(pool.pressureReport, undefined);
   assert.throws(() => new HostRunner({ ...config, stateDir: join(root, "invalid-state"), pressure: { disk: { enterFreeGiB: 20, exitFreeGiB: 10 } } }, dependencies), failure(400));
-  assert.throws(() => new HostRunner({ ...config, provider: "kubevirt", templates: [], stateDir: join(root, "gated-pool-state") }, dependencies), failure(400));
   // A host file without the opt-in still samples and reports, as an observation only.
   const observer = new HostRunner({ ...config, stateDir: join(root, "observer-state"), pressure: { clearSeconds: 30 } }, dependencies); runners.push(observer);
   next = mac("critical"); await observer.samplePressure();

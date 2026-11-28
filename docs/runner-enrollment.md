@@ -49,3 +49,60 @@ database. An older endpoint may not check bound runner identities; sharing writa
 state could admit a colliding UUID. Cutover requires schema compatibility checks and
 explicit fencing of the previous credential authority. Preserve historical bindings
 and receipt identities; replacing the executable does not establish migration safety.
+
+## Kubernetes node bootstrap
+
+Create one legacy connection setup per node with the operator credential.
+Use provider `native` for an inference-only node or `libvirt` for a dedicated
+VM node. The controller scopes the setup to the node's configured name,
+provider and capacity. Claim each setup within 30 minutes.
+
+```sh
+canaveral --url "$controller" --token-file "$operator_token_file" \
+  connection-setups create --config host.json --id "$setup_uuid" \
+  --output-file enrollment-token
+```
+
+The command writes the token to a new private file. If issuance was
+interrupted before the file was saved, inspect `connection-setups list` and
+revoke the lost setup by its UUID before issuing a replacement. The same
+operation is available through `POST /v1/connection-setups`.
+
+Provision the token file at
+`/var/lib/canaverald/bootstrap/enrollment-token`. Give the daemon UID ownership
+of both paths, mode `0700` on the bootstrap directory and mode `0600` on the
+regular token file. The daemon rejects symlinks, hard links and files larger
+than 256 bytes. Supply no setup file or enrollment-token argument.
+
+The daemon records the exact claim in its private state before contacting the
+controller. It retries with the same host ID, credential and offer even when
+the setup token has already been claimed by that ID. After confirmation it
+persists `identity.json`, then deletes the token and the saved claim. Cleanup
+after the identity is written never fails startup; a failure is logged and the
+next start retries. A daemon with an existing identity removes a leftover claim
+only when its host ID, credential and controller URL match that identity, and
+a leftover token only when its digest matches that claim. It applies the same
+owner, mode and link checks as on enrollment and ignores anything else, which
+the operator can remove.
+
+If the controller answers the saved claim with a 4xx (setup expired before it
+was claimed, revoked, or name, provider or capacity mismatch), the daemon
+reports `kubernetes_bootstrap_intent_rejected` and keeps the claim, because a
+4xx cannot prove the claim never succeeded. Supplying a new token alone then
+fails with `kubernetes_bootstrap_recovery_required`, since the claim is bound to
+the original token. The controller gives no authoritative "not enrolled" answer
+to a host, so the operator decides:
+
+1. On the controller, confirm no host with the claim's `id` (in
+   `enrollment-intent.json`) exists and that its setup did not connect
+   (`connection-setups list`). If one was enrolled, restore the original token
+   or retire that identity first.
+2. Remove `enrollment-intent.json` from the node state.
+3. Issue a new setup, write its token to `bootstrap/enrollment-token` and
+   restart the daemon. It creates a fresh host ID and credential.
+
+If the daemon reports `kubernetes_bootstrap_recovery_required`, retain the
+state and restore the original token file if possible. If exact retry cannot
+succeed, inspect and retire any identity from that claim on the controller
+before reprovisioning. Keep the node out of service until prior assignments
+and reservations have been reconciled.

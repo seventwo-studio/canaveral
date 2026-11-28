@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/boot-bundle", "crates/guest-protocol", "crates/guest-agent", "crates/execution-core", "crates/runner-client", "crates/model-execution", "crates/apple-satellite", "crates/kubevirt-execution", "crates/mobile-native", "crates/apple-native"]
+members = ["crates/boot-bundle", "crates/guest-protocol", "crates/guest-agent", "crates/execution-core", "crates/runner-client", "crates/model-execution", "crates/apple-satellite", "crates/mobile-native", "crates/apple-native", "crates/host-installer", "crates/libvirt-native"]
 resolver = "2"
 
 [workspace.package]
