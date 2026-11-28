@@ -37,6 +37,7 @@ interpreter dependency to the controller, host or SDK; see
 - [TypeScript Linux lease controller slice](linux-lease-controller.md)
 - [Bounded Linux command operations](linux-command-operations.md)
 - [infrastructure](infrastructure.md)
+- [host installation paths](host-installation-paths.md) (helper enrollment and planned Canaveral OS rollout)
 - [Host runtime backends](host-runtimes.md) (local inventory, model package management and native acceptance suites)
 - [Runtime qualification](runtime-qualification.md) (durable evidence records and reviewed promotion of exact pins; nothing promoted)
 - [lease eligibility](lease-eligibility.md)

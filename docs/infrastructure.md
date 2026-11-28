@@ -4,6 +4,9 @@ A host provides VMs or simulators through canaverald and connects outbound to th
 
 ## Connect a runner
 
+This is the existing-host helper flow. See [host installation paths](host-installation-paths.md)
+for the planned Canaveral OS installer and update ownership.
+
 Open **Hosts → Add host**. Select the host operating system and enabled runtimes,
 name, controller origin reachable from that runner and its Canaveral
 host limits. Configure storage and provider bindings using the form;
@@ -79,12 +82,13 @@ structured checks with passed/warning/failed/skipped status and repair guidance.
 Raw SDK stderr, environment variables and credentials are not sent.
 Provider adapters perform their existing ownership and runtime/image validation.
 
-Libvirt checks separately report a configured Linux deadline library's static
-ELF/architecture/function-export validation and the still-unverified native lease
-behavior. Inspection never loads the library. Missing configuration warns;
-configured invalid artifacts fail with fixed repair guidance and no private paths.
-`libvirtLeaseArtifact` means the artifact inspection passed; it grants no consumer
-lease eligibility or native execution guarantee. Native expiry, cleanup, restart
+Libvirt lease eligibility comes from the pinned lease helper (`leaseHelper` and
+`leaseHelperSha256`) and the kernel's peer pidfd support, as described in
+[libvirt lease supervision](libvirt-supervision.md#helper-identity);
+`canaverald runtimes status` reports it. There is no separate deadline library to
+configure. The health report's `libvirt-lease-artifact` check predates the helper,
+receives no evidence and therefore only warns; it grants no consumer lease
+eligibility or native execution guarantee. Native expiry, cleanup, restart
 and isolation retain their separate acceptance gate.
 
 Checks run independently of heartbeats every 60 seconds. **Run checks** queues an
@@ -136,8 +140,8 @@ The dashboard separates host limits, reservations and observed usage:
   removal. A stored [device baseline](warm-pool-and-baselines.md#what-is-stored) charges
   its host's disk, and a save in progress holds twice the device's data size plus 2 GiB.
 - **Observed usage:** host-wide CPU busy percentage, total/available memory and
-  total/free storage on the configured storage filesystem, collected with
-  [psutil](https://psutil.io/). Other applications are included; the first CPU
+  total/free storage on the configured storage filesystem, sampled through Node's
+  `os` and filesystem (`statfs`) APIs; no extra package is needed. Other applications are included; the first CPU
   reading or denied/unsupported metrics are unavailable, not invented zeroes.
 
 Samples are collected every five seconds and persisted at most once per ten
